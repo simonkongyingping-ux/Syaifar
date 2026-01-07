@@ -221,10 +221,12 @@ def main(page: ft.Page):
         page.update()
 
     def get_drawer():
+        # --- CHANGED: SWAPPED ORDER HERE ---
         nav_items = [
-            ft.NavigationDrawerDestination(icon=ft.Icons.DASHBOARD, label="Overview (Dashboard)"),
             ft.NavigationDrawerDestination(icon=ft.Icons.SEARCH, label="Global Search"),
+            ft.NavigationDrawerDestination(icon=ft.Icons.DASHBOARD, label="Overview (Dashboard)"),
         ]
+        
         for idx, label in STATUSES:
             if idx < 7: nav_items.append(ft.NavigationDrawerDestination(icon=ft.Icons.CIRCLE_OUTLINED, label=label))
 
@@ -251,11 +253,14 @@ def main(page: ft.Page):
             state["last_local_filter"] = ""
             state["scroll_pos"] = 0.0 
 
+            # --- CHANGED: UPDATED INDEX LOGIC HERE ---
             if idx == 0: 
+                show_search_view()
+            elif idx == 1: 
                 state["last_view_type"] = "overview"
                 load_job_list_view("Overview Dashboard")
-            elif idx == 1: 
-                show_search_view()
+            
+            # The rest remains the same because statuses start at index 2
             elif 2 <= idx <= 8: 
                 status_idx = STATUSES[idx - 2][0]
                 state["last_view_type"] = "status"
