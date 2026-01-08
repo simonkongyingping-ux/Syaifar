@@ -91,7 +91,6 @@ class DbManager:
             res = self.client.table("memo_system").insert(data).execute()
             if res.data:
                 new_id = res.data[0]['id']
-                # Try logging history
                 hist_ok, hist_err = self.log_history(new_id, data['job_code'], None, 0, user, "Job Created")
                 if not hist_ok:
                     return True, f"Job Created, but Log Failed: {hist_err}"
@@ -117,26 +116,16 @@ class DbManager:
             log_old_s = old_data['status_idx']
             log_new_s = old_data['status_idx']
 
-            # --- STATUS CHANGE LOGIC ---
             if old_status is not None and new_status is not None and old_status != new_status:
-                
-                # Get labels (e.g., "0% - Job Created")
                 old_lbl = STATUS_DICT.get(old_status, "?")
                 new_lbl = STATUS_DICT.get(new_status, "?")
-                
-                # Split by " - " to get just the percentage part
                 old_short = old_lbl.split(" - ")[0]
                 new_short = new_lbl.split(" - ")[0]
-
-                # Special handle for "Closed" since it has no hyphen
                 if old_status == 7: old_short = "Closed"
                 if new_status == 7: new_short = "Closed"
-
                 log_msg = f"{old_short} -> {new_short}"
                 log_old_s = old_status
                 log_new_s = new_status
-            
-            # --- DETAILS CHANGE LOGIC ---
             else:
                 core_fields = ["customer", "supervisor", "trailer_type", "price_text"]
                 core_changed = any(str(old_data.get(f,'')) != str(new_data.get(f,'')) for f in core_fields if f in new_data)
@@ -145,7 +134,6 @@ class DbManager:
                 elif "summary" in new_data and str(old_data.get("summary",'')) != str(new_data["summary"]): log_msg = "Summary Updated"
                 elif "notes" in new_data and str(old_data.get("notes",'')) != str(new_data["notes"]): log_msg = "Notes Updated"
 
-            # 4. EXECUTE LOG
             if log_msg:
                 hist_ok, hist_err = self.log_history(job_id, job_code, log_old_s, log_new_s, user, log_msg)
                 if not hist_ok:
@@ -173,7 +161,6 @@ class DbManager:
             self.client.table("job_history").insert(log).execute()
             return True, None
         except Exception as e:
-            print(f"Log Error: {e}")
             return False, str(e)
 
 db = DbManager()
@@ -186,7 +173,6 @@ def main(page: ft.Page):
     page.window.width = 390
     page.window.height = 844
 
-    # Helper for feedback
     def show_snack(msg, is_error=False):
         page.snack_bar = ft.SnackBar(
             content=ft.Text(msg),
@@ -216,17 +202,29 @@ def main(page: ft.Page):
         "scroll_pos": 0.0 
     }
 
+    # --- HARDWARE BACK BUTTON LOGIC ---
+    def handle_back_button(view):
+        # If we are NOT on the overview (dashboard) or login, go back to overview
+        if state["user"] != "" and state["last_view_type"] != "overview":
+            state["last_view_type"] = "overview"
+            load_job_list_view("Overview Dashboard")
+            return True # Prevent App Minimization
+        
+        # If we are ALREADY on overview, allow minimization
+        return False
+
+    # Register the back button handler
+    page.on_back_button = handle_back_button
+
     def safe_open_drawer(e):
         page.drawer.open = True
         page.update()
 
     def get_drawer():
-        # --- CHANGED: SWAPPED ORDER HERE ---
         nav_items = [
-            ft.NavigationDrawerDestination(icon=ft.Icons.SEARCH, label="Global Search"),
             ft.NavigationDrawerDestination(icon=ft.Icons.DASHBOARD, label="Overview (Dashboard)"),
+            ft.NavigationDrawerDestination(icon=ft.Icons.SEARCH, label="Global Search"),
         ]
-        
         for idx, label in STATUSES:
             if idx < 7: nav_items.append(ft.NavigationDrawerDestination(icon=ft.Icons.CIRCLE_OUTLINED, label=label))
 
@@ -253,14 +251,11 @@ def main(page: ft.Page):
             state["last_local_filter"] = ""
             state["scroll_pos"] = 0.0 
 
-            # --- CHANGED: UPDATED INDEX LOGIC HERE ---
             if idx == 0: 
-                show_search_view()
-            elif idx == 1: 
                 state["last_view_type"] = "overview"
                 load_job_list_view("Overview Dashboard")
-            
-            # The rest remains the same because statuses start at index 2
+            elif idx == 1: 
+                show_search_view()
             elif 2 <= idx <= 8: 
                 status_idx = STATUSES[idx - 2][0]
                 state["last_view_type"] = "status"
@@ -321,7 +316,7 @@ def main(page: ft.Page):
             success, msg = db.login(user_dropdown.value, pass_in.value)
             if success:
                 state["user"] = user_dropdown.value
-                state["role"] = msg # msg is role here
+                state["role"] = msg 
                 page.drawer = get_drawer()
                 reload_current_view() 
             else:
@@ -400,7 +395,7 @@ def main(page: ft.Page):
                 
                 card_content = ft.Container(
                     content=ft.Row([
-                        ft.Column([ft.Text(label, weight="bold", size=16), ft.Text(f"{total} Jobs Pending", color="grey", size=13)], alignment="center"),
+                        ft.Column([ft.Text(label, weight="bold", size=16), ft.Text(f"{total} Active Jobs", color="grey", size=13)], alignment="center"), # CHANGED TEXT HERE
                         ft.Container(content=ft.Column([ft.Icon(ft.Icons.FLAG, color=flag_color, size=20), ft.Text(f"{flagged}", color=flag_color, weight="bold")], horizontal_alignment="center", spacing=2), padding=10, border_radius=8, bgcolor=flag_bg)
                     ], alignment="spaceBetween"),
                     padding=20, on_click=lambda e, i=idx: open_status_view(i)
