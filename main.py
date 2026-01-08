@@ -185,7 +185,7 @@ def main(page: ft.Page):
         content=ft.Column([
             ft.ProgressRing(),
             ft.Text("Initializing System...", size=16)
-        ], horizontal_alignment="center"),
+        ], horizontal_alignment="center", alignment=ft.MainAxisAlignment.CENTER),
         alignment=ft.alignment.center,
         expand=True
     )
@@ -199,21 +199,27 @@ def main(page: ft.Page):
         "last_status_idx": None,
         "last_search_term": "",
         "last_local_filter": "",
-        "scroll_pos": 0.0 
+        "scroll_pos": 0.0,
+        "in_details": False # <-- FLAG FOR HIERARCHY
     }
 
-    # --- HARDWARE BACK BUTTON LOGIC ---
+    # --- HIERARCHY BACK BUTTON LOGIC ---
     def handle_back_button(view):
-        # If we are NOT on the overview (dashboard) or login, go back to overview
+        # 1. If in Level 3 (Details) -> Go back to Level 2 (List)
+        if state["in_details"]:
+            state["in_details"] = False
+            reload_current_view()
+            return True
+        
+        # 2. If in Level 2 (Any List/Search/History) -> Go back to Level 1 (Dashboard)
         if state["user"] != "" and state["last_view_type"] != "overview":
             state["last_view_type"] = "overview"
             load_job_list_view("Overview Dashboard")
-            return True # Prevent App Minimization
+            return True
         
-        # If we are ALREADY on overview, allow minimization
+        # 3. If in Level 1 (Dashboard or Login) -> Allow Minimize
         return False
 
-    # Register the back button handler
     page.on_back_button = handle_back_button
 
     def safe_open_drawer(e):
@@ -249,7 +255,8 @@ def main(page: ft.Page):
         try:
             idx = e.control.selected_index
             state["last_local_filter"] = ""
-            state["scroll_pos"] = 0.0 
+            state["scroll_pos"] = 0.0
+            state["in_details"] = False
 
             if idx == 0: 
                 state["last_view_type"] = "overview"
@@ -266,6 +273,7 @@ def main(page: ft.Page):
                 state["last_status_idx"] = 7
                 load_job_list_view("Archived Jobs")
             elif idx == 10: 
+                state["last_view_type"] = "history"
                 load_history_view()
             elif idx == 11: 
                 state["user"] = ""
@@ -277,10 +285,13 @@ def main(page: ft.Page):
 
     def reload_current_view():
         view_type = state["last_view_type"]
+        state["in_details"] = False 
+
         if view_type == "overview": load_job_list_view("Overview Dashboard")
         elif view_type == "status": load_job_list_view(STATUS_DICT.get(state["last_status_idx"], "Status View"))
         elif view_type == "archive": load_job_list_view("Archived Jobs")
         elif view_type == "search": load_job_list_view(f"Results: {state['last_search_term']}", is_global_search=True)
+        elif view_type == "history": load_history_view()
         else: load_job_list_view("Overview Dashboard")
 
     # --- SCREENS ---
@@ -289,6 +300,7 @@ def main(page: ft.Page):
         page.appbar = None
         page.drawer = None
         page.floating_action_button = None
+        state["in_details"] = False
         
         users_list = []
         connection_status = "Connecting..."
@@ -324,24 +336,29 @@ def main(page: ft.Page):
                 status_lbl.color = "red"
                 page.update()
 
+        # --- LOGIN CENTERED ---
         page.add(
             ft.Container(
                 content=ft.Column([
                     ft.Icon(ft.Icons.DIRECTIONS_CAR, size=60, color="blue"),
-                    ft.Text("Sibu Kanban", size=24, weight="bold"),
+                    ft.Text("Syaifar's Kanban", size=24, weight="bold"),
                     ft.Text("Job Management System", size=16),
                     ft.Divider(height=20, color="transparent"),
                     user_dropdown, pass_in,
                     ft.ElevatedButton("Login", on_click=attempt_login, bgcolor="blue", color="white"),
                     status_lbl
-                ], horizontal_alignment="center"),
-                alignment=ft.alignment.center, expand=True, bgcolor=ft.Colors.BLUE_50
+                ], horizontal_alignment="center", alignment=ft.MainAxisAlignment.CENTER), 
+                alignment=ft.alignment.center,
+                expand=True,
+                bgcolor=ft.Colors.BLUE_50
             )
         )
 
     def show_search_view():
         page.clean()
         state["last_local_filter"] = "" 
+        state["in_details"] = False
+        
         search_box = ft.TextField(label="Search (Code, Cust, PIC)", expand=True, autofocus=True)
         def run_search(e):
             if not search_box.value: return
@@ -354,6 +371,7 @@ def main(page: ft.Page):
 
     def load_job_list_view(title, is_global_search=False):
         page.clean()
+        state["in_details"] = False
         
         def open_status_view(idx):
             state["last_view_type"] = "status"
@@ -395,7 +413,7 @@ def main(page: ft.Page):
                 
                 card_content = ft.Container(
                     content=ft.Row([
-                        ft.Column([ft.Text(label, weight="bold", size=16), ft.Text(f"{total} Active Jobs", color="grey", size=13)], alignment="center"), # CHANGED TEXT HERE
+                        ft.Column([ft.Text(label, weight="bold", size=16), ft.Text(f"{total} Active Jobs", color="grey", size=13)], alignment="center"), 
                         ft.Container(content=ft.Column([ft.Icon(ft.Icons.FLAG, color=flag_color, size=20), ft.Text(f"{flagged}", color=flag_color, weight="bold")], horizontal_alignment="center", spacing=2), padding=10, border_radius=8, bgcolor=flag_bg)
                     ], alignment="spaceBetween"),
                     padding=20, on_click=lambda e, i=idx: open_status_view(i)
@@ -469,6 +487,8 @@ def main(page: ft.Page):
 
     def show_job_details(job):
         page.clean()
+        state["in_details"] = True 
+
         is_new = job is None
         is_readonly = state["role"] != "admin"
 
@@ -555,6 +575,8 @@ def main(page: ft.Page):
 
     def load_history_view():
         page.clean()
+        state["in_details"] = False
+        
         page.appbar = ft.AppBar(leading=ft.IconButton(ft.Icons.MENU, on_click=safe_open_drawer), title=ft.Text("System History"), bgcolor="blue", color="white")
         
         logs = db.fetch_history()
