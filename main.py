@@ -203,10 +203,12 @@ def main(page: ft.Page):
         "in_details": False # <-- CRITICAL FLAG
     }
 
-    # --- HIERARCHY LOGIC ---
-    def handle_back_button(view=None): # view=None allows manual calling
+    # --- HIERARCHY LOGIC WITH DEBUG ---
+    def handle_back_button(view=None): 
         # 1. If we are in DETAILS screen, close it and go back to list
         if state["in_details"] is True:
+            # DEBUG: Uncomment the line below to see visual proof on phone
+            # show_snack("Back: Closing Details")
             state["in_details"] = False
             reload_current_view()
             page.update() 
@@ -214,18 +216,21 @@ def main(page: ft.Page):
         
         # 2. If we are in ANY LIST (Archive, Search, History, Status), go to DASHBOARD
         if state["user"] != "" and state["last_view_type"] != "overview":
+            # DEBUG: Uncomment the line below to see visual proof on phone
+            # show_snack("Back: Returning to Dashboard")
             state["last_view_type"] = "overview"
             load_job_list_view("Overview Dashboard")
             page.update() 
             return True
 
-        # 3. If on Dashboard, let Android minimize (return False)
+        # 3. If on Dashboard, let Android minimize
+        # show_snack("Back: Minimizing App") # Visual proof
         return False
 
     # --- DESKTOP KEYBOARD SIMULATOR ---
     def on_keyboard(e: ft.KeyboardEvent):
         if e.key == "Escape":
-            handle_back_button()
+            handle_back_button(None)
 
     page.on_back_button = handle_back_button # For Android
     page.on_keyboard_event = on_keyboard     # For Desktop Testing
@@ -344,19 +349,22 @@ def main(page: ft.Page):
                 status_lbl.color = "red"
                 page.update()
 
-        # --- LOGIN CENTERED ---
+        # --- LOGIN CENTERED (SPACER METHOD) ---
         page.add(
             ft.Container(
                 content=ft.Column([
-                    ft.Icon(ft.Icons.DIRECTIONS_CAR, size=60, color="blue"),
-                    ft.Text("Sibu Kanban", size=24, weight="bold"),
-                    ft.Text("Job Management System", size=16),
-                    ft.Divider(height=20, color="transparent"),
-                    user_dropdown, pass_in,
-                    ft.ElevatedButton("Login", on_click=attempt_login, bgcolor="blue", color="white"),
-                    status_lbl
-                ], horizontal_alignment="center", alignment=ft.MainAxisAlignment.CENTER),
-                alignment=ft.alignment.center,
+                    ft.Container(expand=1), # Top Spacer
+                    ft.Column([
+                        ft.Icon(ft.Icons.DIRECTIONS_CAR, size=60, color="blue"),
+                        ft.Text("Sibu Kanban", size=24, weight="bold"),
+                        ft.Text("Job Management System", size=16),
+                        ft.Divider(height=20, color="transparent"),
+                        user_dropdown, pass_in,
+                        ft.ElevatedButton("Login", on_click=attempt_login, bgcolor="blue", color="white"),
+                        status_lbl
+                    ], horizontal_alignment="center"),
+                    ft.Container(expand=1), # Bottom Spacer
+                ], horizontal_alignment="center"),
                 expand=True,
                 bgcolor=ft.Colors.BLUE_50
             )
