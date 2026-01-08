@@ -2,6 +2,7 @@ import flet as ft
 from supabase import create_client, Client
 from datetime import datetime, timedelta
 import os
+import traceback # Added for safety
 
 # Paste your actual keys here (Strings)
 SUPABASE_URL = "https://qqxaujdifamluzlhixvv.supabase.co"
@@ -21,7 +22,6 @@ STATUS_DICT = {idx: label for idx, label in STATUSES}
 
 # --- HELPER: MALAYSIAN TIME ---
 def get_mys_iso():
-    # UTC + 8 Hours
     return (datetime.utcnow() + timedelta(hours=8)).isoformat()
 
 # --- DATABASE MANAGER ---
@@ -71,7 +71,6 @@ class DbManager:
             res = query.order("updated_at", desc=True).execute()
             return res.data
         except Exception as e:
-            print(f"DB Error: {e}")
             return []
 
     def fetch_history(self):
@@ -167,12 +166,69 @@ db = DbManager()
 
 # --- MAIN APP ---
 def main(page: ft.Page):
+    # 1. SETUP PAGE BASICS
     page.theme_mode = ft.ThemeMode.LIGHT
     page.padding = 0
-    page.title = "Sibu Kanban"
+    page.title = "Syaifar's Kanban"
     page.window.width = 390
     page.window.height = 844
 
+    # 2. DEFINE STATE IMMEDIATELY (Before Back Handler)
+    state = {
+        "user": "",
+        "role": "",
+        "last_view_type": "overview", 
+        "last_status_idx": None,
+        "last_search_term": "",
+        "last_local_filter": "",
+        "scroll_pos": 0.0,
+        "in_details": False 
+    }
+
+    # 3. ROBUST BACK HANDLER (Defined Early)
+    def handle_back_button(view=None):
+        try:
+            # A. If in Details -> Close Details
+            if state["in_details"]:
+                state["in_details"] = False
+                reload_current_view()
+                # page.snack_bar = ft.SnackBar(ft.Text("Returning to List..."))
+                # page.snack_bar.open = True
+                page.update()
+                return True
+
+            # B. If in a List (and logged in) -> Go to Dashboard
+            if state["user"] != "" and state["last_view_type"] != "overview":
+                state["last_view_type"] = "overview"
+                load_job_list_view("Overview Dashboard")
+                # page.snack_bar = ft.SnackBar(ft.Text("Returning to Dashboard..."))
+                # page.snack_bar.open = True
+                page.update()
+                return True
+            
+            # C. If on Dashboard or Login -> Minimize (Default)
+            # page.snack_bar = ft.SnackBar(ft.Text("Minimizing App..."))
+            # page.snack_bar.open = True
+            page.update()
+            return False
+
+        except Exception as e:
+            print(f"Back Error: {e}")
+            return False # Let OS handle if we crash
+
+    # 4. REGISTER HANDLER IMMEDIATELY
+    page.on_back_button = handle_back_button
+    
+    # 5. DESKTOP SIMULATION (Esc Key)
+    def on_keyboard(e: ft.KeyboardEvent):
+        if e.key == "Escape":
+            handle_back_button()
+    page.on_keyboard_event = on_keyboard
+    
+    # 6. FORCE UPDATE TO REGISTER LISTENERS
+    page.update()
+
+    # --- HELPERS ---
     def show_snack(msg, is_error=False):
         page.snack_bar = ft.SnackBar(
             content=ft.Text(msg),
@@ -181,6 +237,7 @@ def main(page: ft.Page):
         page.snack_bar.open = True
         page.update()
 
+    # --- UI COMPONENTS ---
     loading_container = ft.Container(
         content=ft.Column([
             ft.ProgressRing(),
@@ -191,49 +248,6 @@ def main(page: ft.Page):
     )
     page.add(loading_container)
     page.update()
-
-    state = {
-        "user": "",
-        "role": "",
-        "last_view_type": "overview", 
-        "last_status_idx": None,
-        "last_search_term": "",
-        "last_local_filter": "",
-        "scroll_pos": 0.0,
-        "in_details": False # <-- CRITICAL FLAG
-    }
-
-    # --- HIERARCHY LOGIC WITH DEBUG ---
-    def handle_back_button(view=None): 
-        # 1. If we are in DETAILS screen, close it and go back to list
-        if state["in_details"] is True:
-            # DEBUG: Uncomment the line below to see visual proof on phone
-            # show_snack("Back: Closing Details")
-            state["in_details"] = False
-            reload_current_view()
-            page.update() 
-            return True
-        
-        # 2. If we are in ANY LIST (Archive, Search, History, Status), go to DASHBOARD
-        if state["user"] != "" and state["last_view_type"] != "overview":
-            # DEBUG: Uncomment the line below to see visual proof on phone
-            # show_snack("Back: Returning to Dashboard")
-            state["last_view_type"] = "overview"
-            load_job_list_view("Overview Dashboard")
-            page.update() 
-            return True
-
-        # 3. If on Dashboard, let Android minimize
-        # show_snack("Back: Minimizing App") # Visual proof
-        return False
-
-    # --- DESKTOP KEYBOARD SIMULATOR ---
-    def on_keyboard(e: ft.KeyboardEvent):
-        if e.key == "Escape":
-            handle_back_button(None)
-
-    page.on_back_button = handle_back_button # For Android
-    page.on_keyboard_event = on_keyboard     # For Desktop Testing
 
     def safe_open_drawer(e):
         page.drawer.open = True
@@ -349,22 +363,19 @@ def main(page: ft.Page):
                 status_lbl.color = "red"
                 page.update()
 
-        # --- LOGIN CENTERED (SPACER METHOD) ---
+        # --- LOGIN CENTERED ---
         page.add(
             ft.Container(
                 content=ft.Column([
-                    ft.Container(expand=1), # Top Spacer
-                    ft.Column([
-                        ft.Icon(ft.Icons.DIRECTIONS_CAR, size=60, color="blue"),
-                        ft.Text("Sibu Kanban", size=24, weight="bold"),
-                        ft.Text("Job Management System", size=16),
-                        ft.Divider(height=20, color="transparent"),
-                        user_dropdown, pass_in,
-                        ft.ElevatedButton("Login", on_click=attempt_login, bgcolor="blue", color="white"),
-                        status_lbl
-                    ], horizontal_alignment="center"),
-                    ft.Container(expand=1), # Bottom Spacer
-                ], horizontal_alignment="center"),
+                    ft.Icon(ft.Icons.DIRECTIONS_CAR, size=60, color="blue"),
+                    ft.Text("Syaifar's Kanban", size=24, weight="bold"),
+                    ft.Text("Job Management System", size=16),
+                    ft.Divider(height=20, color="transparent"),
+                    user_dropdown, pass_in,
+                    ft.ElevatedButton("Login", on_click=attempt_login, bgcolor="blue", color="white"),
+                    status_lbl
+                ], horizontal_alignment="center", alignment=ft.MainAxisAlignment.CENTER),
+                alignment=ft.alignment.center,
                 expand=True,
                 bgcolor=ft.Colors.BLUE_50
             )
