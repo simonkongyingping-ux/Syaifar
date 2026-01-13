@@ -185,40 +185,41 @@ def main(page: ft.Page):
         "in_details": False 
     }
 
-    # 3. ROBUST BACK HANDLER (Defined Early)
-    def handle_back_button(view=None):
+    # 3. ROBUST BACK HANDLER
+    # We change (e) to (e=None) so it works even when called manually by the Escape key
+    def handle_back_button(e=None):
         try:
-            # A. If in Details -> Close Details
+            # CHECK 1: Is the Navigation Drawer open?
+            if page.drawer and page.drawer.open:
+                page.drawer.open = False
+                page.update()
+                return True
+
+            # CHECK 2: Are we viewing Job Details?
             if state["in_details"]:
                 state["in_details"] = False
                 reload_current_view()
-                # page.snack_bar = ft.SnackBar(ft.Text("Returning to List..."))
-                # page.snack_bar.open = True
                 page.update()
                 return True
 
-            # B. If in a List (and logged in) -> Go to Dashboard
+            # CHECK 3: Are we in a specific list (Search, Status, Archive)?
             if state["user"] != "" and state["last_view_type"] != "overview":
                 state["last_view_type"] = "overview"
                 load_job_list_view("Overview Dashboard")
-                # page.snack_bar = ft.SnackBar(ft.Text("Returning to Dashboard..."))
-                # page.snack_bar.open = True
                 page.update()
                 return True
             
-            # C. If on Dashboard or Login -> Minimize (Default)
-            # page.snack_bar = ft.SnackBar(ft.Text("Minimizing App..."))
-            # page.snack_bar.open = True
-            page.update()
+            # CHECK 4: Default behavior (Minimize App)
             return False
 
-        except Exception as e:
-            print(f"Back Error: {e}")
-            return False # Let OS handle if we crash
+        except Exception as ex:
+            print(f"Back Error: {ex}")
+            return False
+
 
     # 4. REGISTER HANDLER IMMEDIATELY
     page.on_back_button = handle_back_button
-    
+
     # 5. DESKTOP SIMULATION (Esc Key)
     def on_keyboard(e: ft.KeyboardEvent):
         if e.key == "Escape":
@@ -400,26 +401,36 @@ def main(page: ft.Page):
         page.clean()
         state["in_details"] = False
         
-        def open_status_view(idx):
-            state["last_view_type"] = "status"
-            state["last_status_idx"] = idx
-            state["last_local_filter"] = "" 
-            state["scroll_pos"] = 0.0
+        # --- 1. SETUP APPBAR ---
+        def refresh_action(e):
             reload_current_view()
 
         appbar_actions = []
         if state["role"] == "admin":
              appbar_actions.append(ft.IconButton(ft.Icons.ADD, on_click=lambda e: show_job_details(None), tooltip="Create New Job"))
-        appbar_actions.append(ft.IconButton(ft.Icons.REFRESH, on_click=lambda e: reload_current_view(), tooltip="Refresh"))
+        appbar_actions.append(ft.IconButton(ft.Icons.REFRESH, on_click=refresh_action, tooltip="Refresh"))
 
-        page.appbar = ft.AppBar(leading=ft.IconButton(ft.Icons.MENU, on_click=safe_open_drawer), title=ft.Text(title, size=16), bgcolor="blue", color="white", actions=appbar_actions)
+        page.appbar = ft.AppBar(
+            leading=ft.IconButton(ft.Icons.MENU, on_click=safe_open_drawer), 
+            title=ft.Text(title, size=16), 
+            bgcolor="blue", 
+            color="white", 
+            actions=appbar_actions
+        )
         page.floating_action_button = None
 
-        if is_global_search: jobs = db.fetch_jobs(search_term=state["last_search_term"])
-        elif state["last_view_type"] == "archive": jobs = db.fetch_jobs(status_filter=7, closed=1)
-        elif state["last_view_type"] == "status": jobs = db.fetch_jobs(status_filter=state["last_status_idx"])
-        else: jobs = db.fetch_jobs(status_filter=None, closed=0)
+        # --- 2. FETCH DATA ---
+        if is_global_search: 
+            jobs = db.fetch_jobs(search_term=state["last_search_term"])
+        elif state["last_view_type"] == "archive": 
+            jobs = db.fetch_jobs(status_filter=7, closed=1)
+        elif state["last_view_type"] == "status": 
+            jobs = db.fetch_jobs(status_filter=state["last_status_idx"])
+        else: 
+            # Overview Dashboard Data
+            jobs = db.fetch_jobs(status_filter=None, closed=0)
 
+        # --- 3. DASHBOARD (Special Case) ---
         if state["last_view_type"] == "overview":
             stats = {idx: {'total': 0, 'flagged': 0} for idx, _ in STATUSES if idx < 7}
             for j in jobs:
@@ -430,6 +441,13 @@ def main(page: ft.Page):
 
             dashboard_col = ft.Column(spacing=10, scroll=ft.ScrollMode.ADAPTIVE, expand=True)
             dashboard_col.controls.append(ft.Container(content=ft.Text(f"Total Active Jobs: {len(jobs)}", size=20, weight="bold", color="blue"), padding=10))
+
+            def open_status_view(idx):
+                state["last_view_type"] = "status"
+                state["last_status_idx"] = idx
+                state["last_local_filter"] = "" 
+                state["scroll_pos"] = 0.0
+                reload_current_view()
 
             for idx, label in STATUSES:
                 if idx >= 7: continue 
@@ -449,25 +467,17 @@ def main(page: ft.Page):
             page.add(ft.Container(content=dashboard_col, padding=10, expand=True))
             return 
 
-        local_search_box = ft.TextField(value=state.get("last_local_filter", ""), hint_text=f"Filter these {len(jobs)} jobs...", prefix_icon=ft.Icons.SEARCH, height=40, text_size=14, content_padding=10)
-        
+        # --- 4. LIST VIEW LOGIC ---
         def on_scroll_list(e: ft.OnScrollEvent): state["scroll_pos"] = e.pixels
         list_container = ft.ListView(expand=True, spacing=10, on_scroll=on_scroll_list)
 
-        def render_jobs(filter_text=""):
-            state["last_local_filter"] = filter_text
+        def draw_cards(job_list):
             list_container.controls.clear()
-            filter_text = filter_text.lower()
-            visible_jobs = []
-            if not filter_text: visible_jobs = jobs
-            else:
-                for j in jobs:
-                    full_text = f"{j['job_code']} {j.get('customer','')} {j.get('supervisor','')} {j.get('summary','')}".lower()
-                    if filter_text in full_text: visible_jobs.append(j)
+            if not job_list: 
+                list_container.controls.append(ft.Text("No jobs found.", text_align="center", color="grey"))
+                return
 
-            if not visible_jobs: list_container.controls.append(ft.Text("No jobs match filter.", text_align="center"))
-            
-            for job in visible_jobs:
+            for job in job_list:
                 is_flagged = (job.get('flagged', 0) == 1) or (job.get('flagged') is True)
                 card_bg = ft.Colors.RED_400 if is_flagged else "white"
                 text_color = "white" if is_flagged else "black"
@@ -507,10 +517,83 @@ def main(page: ft.Page):
                 list_container.controls.append(ft.Card(content=card_content, color=card_bg))
             page.update()
 
-        local_search_box.on_change = lambda e: render_jobs(e.control.value)
-        render_jobs(local_search_box.value)
-        page.add(ft.Container(content=ft.Column([ft.Container(content=local_search_box, padding=10), list_container], spacing=0, expand=True), expand=True))
-        if state["scroll_pos"] > 0: list_container.scroll_to(offset=state["scroll_pos"], duration=0)
+        # --- 5. SEARCH BAR SELECTION ---
+        top_bar = None
+        
+        if is_global_search:
+            # === GLOBAL SEARCH (Trigger DB) ===
+            # We use a Reference to the TextField so the Button can read it
+            search_input = ft.TextField(
+                value=state["last_search_term"],
+                label="Search Database",
+                hint_text="Job Code / Cust...",
+                expand=True,      # Takes all available space
+                height=50,
+                text_size=14,
+                content_padding=10
+            )
+
+            def run_search_trigger(e):
+                new_term = search_input.value
+                if not new_term: return
+                state["last_search_term"] = new_term
+                load_job_list_view(f"Results: {new_term}", is_global_search=True)
+
+            # Bind 'Enter' key on keyboard
+            search_input.on_submit = run_search_trigger
+
+            # Create the clickable button
+            search_btn = ft.IconButton(
+                icon=ft.Icons.SEARCH, 
+                icon_color="blue",
+                tooltip="Click to Search",
+                on_click=run_search_trigger
+            )
+
+            # Combine them in a Row
+            top_bar = ft.Row([search_input, search_btn], spacing=5)
+            
+            # Draw initial results
+            draw_cards(jobs)
+
+        else:
+            # === LOCAL FILTER (Filter Memory) ===
+            def run_local_filter(e):
+                filter_text = e.control.value.lower()
+                state["last_local_filter"] = filter_text
+                
+                visible_jobs = []
+                if not filter_text: 
+                    visible_jobs = jobs
+                else:
+                    for j in jobs:
+                        full_text = f"{j['job_code']} {j.get('customer','')} {j.get('supervisor','')} {j.get('summary','')}".lower()
+                        if filter_text in full_text: visible_jobs.append(j)
+                draw_cards(visible_jobs)
+
+            top_bar = ft.TextField(
+                value=state.get("last_local_filter", ""), 
+                hint_text=f"Filter these {len(jobs)} jobs...", 
+                prefix_icon=ft.Icons.FILTER_LIST, 
+                height=50, 
+                text_size=14, 
+                content_padding=10,
+                on_change=run_local_filter
+            )
+            # Run once to apply any existing filter
+            run_local_filter(ft.ControlEvent(target="", name="change", data=state.get("last_local_filter", ""), control=top_bar, page=page))
+
+        # --- 6. ADD TO PAGE ---
+        page.add(ft.Container(
+            content=ft.Column([
+                ft.Container(content=top_bar, padding=10), 
+                list_container
+            ], spacing=0, expand=True), 
+            expand=True
+        ))
+        
+        if state["scroll_pos"] > 0: 
+            list_container.scroll_to(offset=state["scroll_pos"], duration=0)
 
     def show_job_details(job):
         page.clean()
