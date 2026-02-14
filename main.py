@@ -2,13 +2,17 @@ import flet as ft
 from supabase import create_client, Client
 from datetime import datetime, timedelta
 import os
-import traceback # Added for safety
+import traceback 
 
 # Paste your actual keys here (Strings)
 SUPABASE_URL = "https://qqxaujdifamluzlhixvv.supabase.co"
 SUPABASE_KEY = "sb_publishable_lVx4h2kOKOB6_zenbJRH_g_GNCt5TgX"
 
-STATUSES = [
+# --- VERSION ---
+APP_VERSION = "v1.9.2 (Mobile)"
+
+# --- CONFIGURATION ---
+STATUSES_NEW = [
     (0, "0% - Job Created"),
     (1, "10% - Chassis Fab Started"),
     (2, "30% - Body Fab Started"),
@@ -16,9 +20,20 @@ STATUSES = [
     (4, "80% - Fittings Started"),
     (5, "90% - PUS / JPJ"),
     (6, "100% - Ready For Delivery"),
-    (7, "Closed / Archived"),
+    (7, "Delivered"),
+    (8, "Closed / Archived"),
 ]
-STATUS_DICT = {idx: label for idx, label in STATUSES}
+
+STATUSES_USED = [
+    (0, "0% - Job Created"),
+    (3, "50% - Work In Progress"),
+    (6, "100% - Ready For Delivery"),
+    (7, "Delivered"),
+    (8, "Closed / Archived"),
+]
+
+STATUS_DICT = {idx: label for idx, label in STATUSES_NEW}
+STATUS_DICT[3] = "50% - Painting / WIP" 
 
 # --- HELPER: MALAYSIAN TIME ---
 def get_mys_iso():
@@ -52,19 +67,22 @@ class DbManager:
         except Exception as e:
             return False, str(e)
 
-    def fetch_jobs(self, status_filter=None, closed=0, search_term=None):
+    def fetch_jobs(self, category="new", status_filter=None, closed=0, search_term=None):
         if not self.client: return []
         try:
             query = self.client.table("memo_system").select("*")
             
+            # Filter by Category
+            query = query.eq("category", category)
+
             if search_term:
-                or_str = f"job_code.ilike.%{search_term}%,customer.ilike.%{search_term}%,supervisor.ilike.%{search_term}%,summary.ilike.%{search_term}%"
+                or_str = f"job_code.ilike.%{search_term}%,memo_no.ilike.%{search_term}%,do_no.ilike.%{search_term}%,invoice_no.ilike.%{search_term}%,customer.ilike.%{search_term}%,supervisor.ilike.%{search_term}%"
                 query = query.or_(or_str)
             else:
-                if status_filter == 7:
-                    query = query.eq("status_idx", 7)
+                if status_filter == 8: 
+                    query = query.eq("status_idx", 8)
                 else:
-                    query = query.neq("status_idx", 7)
+                    query = query.neq("status_idx", 8)
                     if status_filter is not None:
                         query = query.eq("status_idx", status_filter)
             
@@ -120,21 +138,22 @@ class DbManager:
                 new_lbl = STATUS_DICT.get(new_status, "?")
                 old_short = old_lbl.split(" - ")[0]
                 new_short = new_lbl.split(" - ")[0]
-                if old_status == 7: old_short = "Closed"
-                if new_status == 7: new_short = "Closed"
+                if old_status == 8: old_short = "Closed"
+                if new_status == 8: new_short = "Closed"
                 log_msg = f"{old_short} -> {new_short}"
                 log_old_s = old_status
                 log_new_s = new_status
             else:
-                core_fields = ["customer", "supervisor", "trailer_type", "price_text"]
+                core_fields = ["customer", "price_text", "memo_no", "invoice_no", "do_no", "billed_by", "job_code"]
                 core_changed = any(str(old_data.get(f,'')) != str(new_data.get(f,'')) for f in core_fields if f in new_data)
                 
                 if core_changed: log_msg = "Details Updated"
-                elif "summary" in new_data and str(old_data.get("summary",'')) != str(new_data["summary"]): log_msg = "Summary Updated"
+                elif "price_breakdown" in new_data and str(old_data.get("price_breakdown",'')) != str(new_data["price_breakdown"]): log_msg = "Price Breakdown Updated"
                 elif "notes" in new_data and str(old_data.get("notes",'')) != str(new_data["notes"]): log_msg = "Notes Updated"
 
             if log_msg:
-                hist_ok, hist_err = self.log_history(job_id, job_code, log_old_s, log_new_s, user, log_msg)
+                final_job_code = new_data.get("job_code", job_code)
+                hist_ok, hist_err = self.log_history(job_id, final_job_code, log_old_s, log_new_s, user, log_msg)
                 if not hist_ok:
                     return True, f"Saved, but History Failed: {hist_err}"
 
@@ -169,14 +188,15 @@ def main(page: ft.Page):
     # 1. SETUP PAGE BASICS
     page.theme_mode = ft.ThemeMode.LIGHT
     page.padding = 0
-    page.title = "Syaifar's Kanban"
+    page.title = f"Syaifar's Kanban {APP_VERSION}"
     page.window.width = 390
     page.window.height = 844
 
-    # 2. DEFINE STATE IMMEDIATELY (Before Back Handler)
+    # 2. DEFINE STATE IMMEDIATELY
     state = {
         "user": "",
         "role": "",
+        "category": "new",  # 'new' or 'used'
         "last_view_type": "overview", 
         "last_status_idx": None,
         "last_search_term": "",
@@ -186,30 +206,25 @@ def main(page: ft.Page):
     }
 
     # 3. ROBUST BACK HANDLER
-    # We change (e) to (e=None) so it works even when called manually by the Escape key
     def handle_back_button(e=None):
         try:
-            # CHECK 1: Is the Navigation Drawer open?
             if page.drawer and page.drawer.open:
                 page.drawer.open = False
                 page.update()
                 return True
 
-            # CHECK 2: Are we viewing Job Details?
             if state["in_details"]:
                 state["in_details"] = False
                 reload_current_view()
                 page.update()
                 return True
 
-            # CHECK 3: Are we in a specific list (Search, Status, Archive)?
             if state["user"] != "" and state["last_view_type"] != "overview":
                 state["last_view_type"] = "overview"
                 load_job_list_view("Overview Dashboard")
                 page.update()
                 return True
             
-            # CHECK 4: Default behavior (Minimize App)
             return False
 
         except Exception as ex:
@@ -255,27 +270,40 @@ def main(page: ft.Page):
         page.update()
 
     def get_drawer():
-        nav_items = [
+        current_status_list = STATUSES_NEW if state["category"] == "new" else STATUSES_USED
+        
+        nav_controls = [
+            ft.Container(height=20),
+            ft.Text(f"  MODE: {state['category'].upper()}", weight="bold", size=16, color="red"),
+            ft.Container(height=10),
+            
+            # Category Switchers
+            ft.NavigationDrawerDestination(icon=ft.Icons.CONSTRUCTION, label="New Construction"),
+            ft.NavigationDrawerDestination(icon=ft.Icons.CAR_REPAIR, label="Used / Refurb"),
+            ft.Divider(thickness=1),
+            
+            # Views
             ft.NavigationDrawerDestination(icon=ft.Icons.DASHBOARD, label="Overview (Dashboard)"),
             ft.NavigationDrawerDestination(icon=ft.Icons.SEARCH, label="Global Search"),
+            ft.Divider(thickness=1),
         ]
-        for idx, label in STATUSES:
-            if idx < 7: nav_items.append(ft.NavigationDrawerDestination(icon=ft.Icons.CIRCLE_OUTLINED, label=label))
 
-        nav_items.extend([
+        # Dynamic Status Items
+        for idx, label in current_status_list:
+            if idx < 8: 
+                nav_controls.append(ft.NavigationDrawerDestination(icon=ft.Icons.CIRCLE_OUTLINED, label=label))
+
+        # Bottom Items
+        nav_controls.extend([
+            ft.Divider(thickness=1),
             ft.NavigationDrawerDestination(icon=ft.Icons.ARCHIVE, label="Closed / Archived"),
             ft.NavigationDrawerDestination(icon=ft.Icons.HISTORY, label="History Logs"),
             ft.NavigationDrawerDestination(icon=ft.Icons.LOGOUT, label="Logout"),
+            ft.Container(content=ft.Text(APP_VERSION, color="grey", size=12), padding=ft.padding.only(left=20, top=10, bottom=10))
         ])
 
         return ft.NavigationDrawer(
-            controls=[
-                ft.Container(height=20),
-                ft.Text("  Select View", weight="bold", size=20, color="blue"),
-                ft.Container(height=10),
-                nav_items[0], ft.Divider(thickness=1),
-                nav_items[1], ft.Divider(thickness=1),
-            ] + nav_items[2:9] + [ft.Divider(thickness=1)] + nav_items[9:], 
+            controls=nav_controls, 
             on_change=on_nav_change
         )
 
@@ -285,28 +313,52 @@ def main(page: ft.Page):
             state["last_local_filter"] = ""
             state["scroll_pos"] = 0.0
             state["in_details"] = False
+            
+            current_status_list = STATUSES_NEW if state["category"] == "new" else STATUSES_USED
+            status_count = len([s for s in current_status_list if s[0] < 8])
 
-            if idx == 0: 
+            if idx == 0: # Switch to New
+                state["category"] = "new"
+                state["last_view_type"] = "overview"
+                page.drawer = get_drawer()
+                load_job_list_view("New Construction Dashboard")
+            
+            elif idx == 1: # Switch to Used
+                state["category"] = "used"
+                state["last_view_type"] = "overview"
+                page.drawer = get_drawer()
+                load_job_list_view("Used / Refurb Dashboard")
+
+            elif idx == 2: # Overview
                 state["last_view_type"] = "overview"
                 load_job_list_view("Overview Dashboard")
-            elif idx == 1: 
+
+            elif idx == 3: # Search
                 show_search_view()
-            elif 2 <= idx <= 8: 
-                status_idx = STATUSES[idx - 2][0]
+
+            elif 4 <= idx < (4 + status_count): # Status Filter
+                list_idx = idx - 4
+                status_idx = current_status_list[list_idx][0]
                 state["last_view_type"] = "status"
                 state["last_status_idx"] = status_idx
-                load_job_list_view(STATUS_DICT[status_idx])
-            elif idx == 9: 
+                load_job_list_view(STATUS_DICT.get(status_idx, "Status View"))
+
+            elif idx == (4 + status_count): # Archive
                 state["last_view_type"] = "archive"
-                state["last_status_idx"] = 7
+                state["last_status_idx"] = 8
                 load_job_list_view("Archived Jobs")
-            elif idx == 10: 
+
+            elif idx == (4 + status_count + 1): # History
                 state["last_view_type"] = "history"
                 load_history_view()
-            elif idx == 11: 
+
+            elif idx == (4 + status_count + 2): # Logout
                 state["user"] = ""
                 show_login()
-            page.drawer.open = False
+                return
+
+            if page.drawer:
+                page.drawer.open = False
             page.update()
         except Exception as ex:
             print(f"Nav Error: {ex}")
@@ -315,7 +367,7 @@ def main(page: ft.Page):
         view_type = state["last_view_type"]
         state["in_details"] = False 
 
-        if view_type == "overview": load_job_list_view("Overview Dashboard")
+        if view_type == "overview": load_job_list_view(f"{state['category'].capitalize()} Dashboard")
         elif view_type == "status": load_job_list_view(STATUS_DICT.get(state["last_status_idx"], "Status View"))
         elif view_type == "archive": load_job_list_view("Archived Jobs")
         elif view_type == "search": load_job_list_view(f"Results: {state['last_search_term']}", is_global_search=True)
@@ -366,20 +418,27 @@ def main(page: ft.Page):
 
         # --- LOGIN CENTERED ---
         page.add(
-            ft.Container(
-                content=ft.Column([
-                    ft.Icon(ft.Icons.DIRECTIONS_CAR, size=60, color="blue"),
-                    ft.Text("Syaifar's Kanban", size=24, weight="bold"),
-                    ft.Text("Job Management System", size=16),
-                    ft.Divider(height=20, color="transparent"),
-                    user_dropdown, pass_in,
-                    ft.ElevatedButton("Login", on_click=attempt_login, bgcolor="blue", color="white"),
-                    status_lbl
-                ], horizontal_alignment="center", alignment=ft.MainAxisAlignment.CENTER),
-                alignment=ft.alignment.center,
-                expand=True,
-                bgcolor=ft.Colors.BLUE_50
-            )
+            ft.Stack([
+                ft.Container(
+                    content=ft.Column([
+                        ft.Icon(ft.Icons.DIRECTIONS_CAR, size=60, color="blue"),
+                        ft.Text("Syaifar's Kanban", size=24, weight="bold"),
+                        ft.Text("Job Management System", size=16),
+                        ft.Divider(height=20, color="transparent"),
+                        user_dropdown, pass_in,
+                        ft.ElevatedButton("Login", on_click=attempt_login, bgcolor="blue", color="white"),
+                        status_lbl
+                    ], horizontal_alignment="center", alignment=ft.MainAxisAlignment.CENTER),
+                    alignment=ft.alignment.center,
+                    expand=True,
+                    bgcolor=ft.Colors.BLUE_50
+                ),
+                ft.Container(
+                    content=ft.Text(APP_VERSION, color="grey", size=12, weight="bold"),
+                    bottom=10,
+                    left=10
+                )
+            ], expand=True)
         )
 
     def show_search_view():
@@ -387,7 +446,7 @@ def main(page: ft.Page):
         state["last_local_filter"] = "" 
         state["in_details"] = False
         
-        search_box = ft.TextField(label="Search (Code, Cust, PIC)", expand=True, autofocus=True)
+        search_box = ft.TextField(label="Search (Code, Memo, DO, Inv, Cust)", expand=True, autofocus=True)
         def run_search(e):
             if not search_box.value: return
             state["last_view_type"] = "search"
@@ -401,6 +460,8 @@ def main(page: ft.Page):
         page.clean()
         state["in_details"] = False
         
+        current_status_list = STATUSES_NEW if state["category"] == "new" else STATUSES_USED
+
         # --- 1. SETUP APPBAR ---
         def refresh_action(e):
             reload_current_view()
@@ -413,7 +474,7 @@ def main(page: ft.Page):
         page.appbar = ft.AppBar(
             leading=ft.IconButton(ft.Icons.MENU, on_click=safe_open_drawer), 
             title=ft.Text(title, size=16), 
-            bgcolor="blue", 
+            bgcolor="blue" if state["category"] == "new" else "orange", 
             color="white", 
             actions=appbar_actions
         )
@@ -421,18 +482,17 @@ def main(page: ft.Page):
 
         # --- 2. FETCH DATA ---
         if is_global_search: 
-            jobs = db.fetch_jobs(search_term=state["last_search_term"])
+            jobs = db.fetch_jobs(category=state["category"], search_term=state["last_search_term"])
         elif state["last_view_type"] == "archive": 
-            jobs = db.fetch_jobs(status_filter=7, closed=1)
+            jobs = db.fetch_jobs(category=state["category"], status_filter=8, closed=1)
         elif state["last_view_type"] == "status": 
-            jobs = db.fetch_jobs(status_filter=state["last_status_idx"])
+            jobs = db.fetch_jobs(category=state["category"], status_filter=state["last_status_idx"])
         else: 
-            # Overview Dashboard Data
-            jobs = db.fetch_jobs(status_filter=None, closed=0)
+            jobs = db.fetch_jobs(category=state["category"], status_filter=None, closed=0)
 
         # --- 3. DASHBOARD (Special Case) ---
         if state["last_view_type"] == "overview":
-            stats = {idx: {'total': 0, 'flagged': 0} for idx, _ in STATUSES if idx < 7}
+            stats = {idx: {'total': 0, 'flagged': 0} for idx, _ in current_status_list if idx < 8}
             for j in jobs:
                 s_idx = j.get('status_idx', 0)
                 if s_idx in stats:
@@ -440,7 +500,7 @@ def main(page: ft.Page):
                     if (j.get('flagged', 0) == 1) or (j.get('flagged') is True): stats[s_idx]['flagged'] += 1
 
             dashboard_col = ft.Column(spacing=10, scroll=ft.ScrollMode.ADAPTIVE, expand=True)
-            dashboard_col.controls.append(ft.Container(content=ft.Text(f"Total Active Jobs: {len(jobs)}", size=20, weight="bold", color="blue"), padding=10))
+            dashboard_col.controls.append(ft.Container(content=ft.Text(f"Active {state['category'].capitalize()} Jobs: {len(jobs)}", size=20, weight="bold", color="blue"), padding=10))
 
             def open_status_view(idx):
                 state["last_view_type"] = "status"
@@ -449,10 +509,10 @@ def main(page: ft.Page):
                 state["scroll_pos"] = 0.0
                 reload_current_view()
 
-            for idx, label in STATUSES:
-                if idx >= 7: continue 
-                total = stats[idx]['total']
-                flagged = stats[idx]['flagged']
+            for idx, label in current_status_list:
+                if idx >= 8: continue 
+                total = stats.get(idx, {}).get('total', 0)
+                flagged = stats.get(idx, {}).get('flagged', 0)
                 flag_color = ft.Colors.RED if flagged > 0 else ft.Colors.GREY
                 flag_bg = ft.Colors.RED_50 if flagged > 0 else ft.Colors.TRANSPARENT
                 
@@ -484,6 +544,16 @@ def main(page: ft.Page):
                 sub_text_color = "white70" if is_flagged else "grey"
                 icon_color = "white" if is_flagged else "blue"
 
+                memo_val = job.get('memo_no')
+                memo_display = f"Memo: {memo_val}" if memo_val else "Memo: -"
+
+                inv_val = job.get('invoice_no', '')
+                bill_val = job.get('billed_by', '')
+                do_val = job.get('do_no', '')
+                
+                row3_text = f"Inv: {inv_val if inv_val else '-'}  |  DO: {do_val if do_val else '-'}"
+                row4_text = f"Bill: {bill_val if bill_val else '-'}"
+
                 raw_created = str(job.get('created_at', ''))
                 raw_updated = str(job.get('updated_at', ''))
                 nice_created = raw_created.replace('T', ' ')[:16] if raw_created else ""
@@ -499,6 +569,11 @@ def main(page: ft.Page):
                             ft.Text(job['job_code'], weight="bold", size=16, color=text_color),
                             ft.Column(date_col_controls, alignment="end", spacing=0) 
                         ], alignment="spaceBetween"),
+
+                        ft.Text(memo_display, weight="bold", size=14, color=ft.Colors.BLUE_200 if is_flagged else ft.Colors.BLUE),
+                        ft.Text(row3_text, size=12, color=text_color),
+                        ft.Text(row4_text, size=12, color=sub_text_color),
+
                         ft.Divider(height=5, color="transparent"),
                         ft.Text(f"Cust: {job.get('customer', '-')}", size=14, color=text_color),
                         ft.Text(f"Type: {job.get('trailer_type', '-')}", size=12, color=sub_text_color),
@@ -521,13 +596,11 @@ def main(page: ft.Page):
         top_bar = None
         
         if is_global_search:
-            # === GLOBAL SEARCH (Trigger DB) ===
-            # We use a Reference to the TextField so the Button can read it
             search_input = ft.TextField(
                 value=state["last_search_term"],
                 label="Search Database",
-                hint_text="Job Code / Cust...",
-                expand=True,      # Takes all available space
+                hint_text="Job Code / Memo / DO / Inv...",
+                expand=True,      
                 height=50,
                 text_size=14,
                 content_padding=10
@@ -539,10 +612,8 @@ def main(page: ft.Page):
                 state["last_search_term"] = new_term
                 load_job_list_view(f"Results: {new_term}", is_global_search=True)
 
-            # Bind 'Enter' key on keyboard
             search_input.on_submit = run_search_trigger
 
-            # Create the clickable button
             search_btn = ft.IconButton(
                 icon=ft.Icons.SEARCH, 
                 icon_color="blue",
@@ -550,14 +621,10 @@ def main(page: ft.Page):
                 on_click=run_search_trigger
             )
 
-            # Combine them in a Row
             top_bar = ft.Row([search_input, search_btn], spacing=5)
-            
-            # Draw initial results
             draw_cards(jobs)
 
         else:
-            # === LOCAL FILTER (Filter Memory) ===
             def run_local_filter(e):
                 filter_text = e.control.value.lower()
                 state["last_local_filter"] = filter_text
@@ -567,7 +634,7 @@ def main(page: ft.Page):
                     visible_jobs = jobs
                 else:
                     for j in jobs:
-                        full_text = f"{j['job_code']} {j.get('customer','')} {j.get('supervisor','')} {j.get('summary','')}".lower()
+                        full_text = f"{j['job_code']} {j.get('memo_no','')} {j.get('do_no','')} {j.get('invoice_no','')} {j.get('customer','')} {j.get('supervisor','')} {j.get('summary','')}".lower()
                         if filter_text in full_text: visible_jobs.append(j)
                 draw_cards(visible_jobs)
 
@@ -580,10 +647,8 @@ def main(page: ft.Page):
                 content_padding=10,
                 on_change=run_local_filter
             )
-            # Run once to apply any existing filter
             run_local_filter(ft.ControlEvent(target="", name="change", data=state.get("last_local_filter", ""), control=top_bar, page=page))
 
-        # --- 6. ADD TO PAGE ---
         page.add(ft.Container(
             content=ft.Column([
                 ft.Container(content=top_bar, padding=10), 
@@ -605,14 +670,27 @@ def main(page: ft.Page):
         current_flag_val = job.get('flagged', 0) if job else 0
         flag_bool = True if (current_flag_val == 1 or current_flag_val is True) else False
 
-        code_val = job['job_code'] if job else f"JOB-{int(datetime.utcnow().timestamp())}"
-        t_code = ft.TextField(label="Job Code", value=code_val, disabled=(not is_new))
+        category_val = job.get('category', state["category"]) if job else state["category"]
+        
+        id_label = "Job Code" if category_val == "new" else "Unit ID / Reg No"
+        code_val = job['job_code'] if job else f"{'JOB' if category_val=='new' else 'USED'}-{int(datetime.utcnow().timestamp())}"
+        
+        # UPDATED: Editable Job Code
+        t_code = ft.TextField(label=id_label, value=code_val, disabled=False)
+        t_memo = ft.TextField(label="Memo NO", value=job.get('memo_no','') if job else "")
+        
+        t_invoice = ft.TextField(label="Invoice No", value=job.get('invoice_no','') if job else "")
+        t_do = ft.TextField(label="DO Number", value=job.get('do_no','') if job else "")
+        t_billed = ft.TextField(label="Billed By", value=job.get('billed_by','') if job else "")
+
         t_cust = ft.TextField(label="Customer", value=job.get('customer','') if job else "")
         t_pic = ft.TextField(label="PIC / Supervisor", value=job.get('supervisor','') if job else "")
         t_type = ft.TextField(label="Trailer Type", value=job.get('trailer_type','') if job else "")
-        t_price = ft.TextField(label="Price", value=job.get('price_text','') if job else "")
+        t_price = ft.TextField(label="Price (Total)", value=job.get('price_text','') if job else "")
         t_summary = ft.TextField(label="Summary", value=job.get('summary','') if job else "")
-        t_notes = ft.TextField(label="Notes", value=job.get('notes','') if job else "", multiline=True, min_lines=3)
+        t_notes = ft.TextField(label="Production Notes", value=job.get('notes','') if job else "", multiline=True, min_lines=3)
+        t_breakdown = ft.TextField(label="Price Breakdown / Costing", value=job.get('price_breakdown','') if job else "", multiline=True, min_lines=3)
+
         c_flag = ft.Checkbox(label="Flag Urgent", value=flag_bool)
 
         def save_click(e):
@@ -620,9 +698,17 @@ def main(page: ft.Page):
             final_flag = 1 if c_flag.value else 0
 
             data = {
-                "job_code": t_code.value, "customer": t_cust.value, "supervisor": t_pic.value,
+                "job_code": t_code.value, 
+                "memo_no": t_memo.value, 
+                "invoice_no": t_invoice.value,
+                "do_no": t_do.value,
+                "billed_by": t_billed.value,
+                "customer": t_cust.value, "supervisor": t_pic.value,
                 "trailer_type": t_type.value, "price_text": t_price.value, "summary": t_summary.value,
-                "notes": t_notes.value, "flagged": final_flag
+                "notes": t_notes.value, 
+                "price_breakdown": t_breakdown.value,
+                "flagged": final_flag,
+                "category": category_val
             }
 
             if is_new:
@@ -630,7 +716,7 @@ def main(page: ft.Page):
                 data["closed"] = 0
                 success, err = db.create_job(data, state["user"])
             else:
-                success, err = db.update_job(job['id'], data, state["user"], job['job_code'])
+                success, err = db.update_job(job['id'], data, state["user"], t_code.value)
 
             if success:
                 if err: show_snack(f"Job Saved. Warning: {err}", is_error=True)
@@ -641,7 +727,7 @@ def main(page: ft.Page):
 
         def move_status_click(target_idx):
             updates = {"status_idx": target_idx}
-            if target_idx == 7:
+            if target_idx == 8:
                 updates["completed_at"] = get_mys_iso()
                 updates["closed"] = 1
             else:
@@ -652,7 +738,7 @@ def main(page: ft.Page):
             
             if success:
                 if err: show_snack(f"Status Updated. Warning: {err}", is_error=True)
-                if target_idx == 7: state["last_view_type"] = "archive"
+                if target_idx == 8: state["last_view_type"] = "archive"
                 else:
                     state["last_view_type"] = "status"
                     state["last_status_idx"] = target_idx
@@ -664,24 +750,46 @@ def main(page: ft.Page):
 
         page.appbar = ft.AppBar(
             leading=ft.IconButton(ft.Icons.ARROW_BACK, on_click=lambda e: reload_current_view()),
-            title=ft.Text("Job Details"), bgcolor="blue", color="white",
+            title=ft.Text(f"{category_val.capitalize()} Details"), 
+            bgcolor="blue" if category_val == "new" else "orange", 
+            color="white",
             actions=[ft.IconButton(ft.Icons.CHECK, on_click=save_click) if not is_readonly else ft.Container()]
         )
 
         status_buttons = []
         if not is_new and not is_readonly:
+            btns_to_show = STATUSES_NEW if category_val == "new" else STATUSES_USED
             current_s = job.get('status_idx', 0)
             status_buttons.append(ft.Text("Move Status:", weight="bold"))
             row_btns = []
-            for idx, label in STATUSES:
-                if idx < 7 and idx != current_s:
-                    row_btns.append(ft.OutlinedButton(label, on_click=lambda e, i=idx: move_status_click(i)))
+            for idx, label in btns_to_show:
+                if idx < 8 and idx != current_s:
+                    simple_label = label.split(" - ")[0]
+                    row_btns.append(ft.OutlinedButton(simple_label, on_click=lambda e, i=idx: move_status_click(i)))
             status_buttons.append(ft.Row(row_btns, wrap=True))
-            if current_s == 6:
+            if current_s == 7:
                 status_buttons.append(ft.Divider())
-                status_buttons.append(ft.ElevatedButton("CLOSE JOB (ARCHIVE)", color="white", bgcolor="green", on_click=lambda e: move_status_click(7)))
-            
-        page.add(ft.Container(content=ft.Column([t_code, t_cust, t_pic, t_summary, t_type, t_price, c_flag, t_notes, ft.Divider(), ft.Column(status_buttons)], scroll=ft.ScrollMode.ADAPTIVE, expand=True), padding=15, expand=True))
+                status_buttons.append(ft.ElevatedButton("CLOSE JOB (ARCHIVE)", color="white", bgcolor="green", on_click=lambda e: move_status_click(8)))
+        
+        page.add(ft.Container(
+            content=ft.Column([
+                # UPDATED LAYOUT: Vertical Stack
+                t_code, 
+                t_memo, 
+                t_invoice, 
+                t_do, 
+                t_billed,
+                t_cust, t_pic, t_summary, t_type, t_price, 
+                c_flag, 
+                ft.Text("Notes & Costing", weight="bold", color="grey"),
+                t_notes, 
+                t_breakdown, 
+                ft.Divider(), 
+                ft.Column(status_buttons)
+            ], scroll=ft.ScrollMode.ADAPTIVE, expand=True), 
+            padding=15, 
+            expand=True
+        ))
 
     def load_history_view():
         page.clean()
@@ -702,7 +810,6 @@ def main(page: ft.Page):
             raw_time = str(log.get('changed_at', ''))
             time = raw_time.replace('T', ' ')[:16] if raw_time else ""
             
-            # --- DISPLAY LOGIC ---
             details = log.get('details', '')
             if details: msg = details
             elif log.get('old_status') == -1: msg = "Job Created"
