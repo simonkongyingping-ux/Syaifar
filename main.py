@@ -3,12 +3,12 @@ from supabase import create_client, Client
 from datetime import datetime, timedelta, timezone
 import traceback 
 
-# Paste your actual keys here (Strings)
-SUPABASE_URL = "https://qqxaujdifamluzlhixvv.supabase.co"
-SUPABASE_KEY = "sb_publishable_lVx4h2kOKOB6_zenbJRH_g_GNCt5TgX"
+# Paste your actual keys here. The .strip() removes invisible spaces!
+SUPABASE_URL = "https://qqxaujdifamluzlhixvv.supabase.co".strip()
+SUPABASE_KEY = "sb_publishable_lVx4h2kOKOB6_zenbJRH_g_GNCt5TgX".strip()
 
 # --- VERSION ---
-APP_VERSION = "v2.2 (Adaptive Desktop/Mobile)"
+APP_VERSION = "v2.2"
 
 # --- CONFIGURATION ---
 STATUSES_NEW = [
@@ -186,11 +186,11 @@ db = DbManager()
 
 # --- MAIN APP ---
 def main(page: ft.Page):
-    # PROFESSIONAL UPGRADE: Platform Detection
+    # PLATFORM DETECTION
     is_mobile = page.platform in [ft.PagePlatform.ANDROID, ft.PagePlatform.IOS]
 
     page.theme_mode = ft.ThemeMode.LIGHT
-    page.padding = 5 if is_mobile else 0 # More room to breathe on mobile
+    page.padding = 5 if is_mobile else 0
     page.title = f"Syaifar's Kanban {APP_VERSION}"
     
     if not is_mobile:
@@ -537,7 +537,6 @@ def main(page: ft.Page):
                 state["scroll_pos"] = 0.0
                 reload_current_view()
 
-            # PROFESSIONAL UPGRADE: Responsive Columns for Dashboard
             dash_cols = 1 if is_mobile else 2
             dash_ratio = 2.0 if is_mobile else 3.0
             
@@ -570,12 +569,12 @@ def main(page: ft.Page):
 
         # LIST VIEW LOGIC
         def on_scroll_list(e: ft.OnScrollEvent): state["scroll_pos"] = e.pixels
-        
-        # PROFESSIONAL UPGRADE: Responsive Columns for List View
-        list_cols = 1 if is_mobile else 2
-        list_ratio = 0.9 if is_mobile else 1.4 # Lower ratio on mobile gives cards more vertical height so text doesn't squish
 
-        list_container = ft.GridView(expand=True, runs_count=list_cols, child_aspect_ratio=list_ratio, spacing=10, run_spacing=10, padding=10, on_scroll=on_scroll_list)
+        # THE SMART SWITCH: ListView for Mobile, GridView for Desktop
+        if is_mobile:
+            list_container = ft.ListView(expand=True, spacing=10, padding=10, on_scroll=on_scroll_list)
+        else:
+            list_container = ft.GridView(expand=True, runs_count=2, child_aspect_ratio=1.4, spacing=10, run_spacing=10, padding=10, on_scroll=on_scroll_list)
 
         def view_specific_history(e, j_code):
             state["last_view_type"] = "history"
@@ -631,6 +630,7 @@ def main(page: ft.Page):
                     date_col_controls.append(ft.Text(f"Upd: {nice_updated}", size=11, color=sub_text_color))
 
                 card_content = ft.Container(
+                    # NOTE: Removed scroll=ft.ScrollMode.ADAPTIVE here so it doesn't hijack your thumb!
                     content=ft.Column([
                         ft.Row([
                             ft.Text(job['job_code'], weight="bold", size=16, color=text_color),
@@ -641,15 +641,18 @@ def main(page: ft.Page):
 
                         ft.Text(f"Memo: {memo_val if memo_val else '-'}", weight="bold", size=14, color=ft.Colors.BLUE_900 if flag_val>0 else ft.Colors.BLUE),
                         ft.Text(f"Inv: {inv_val if inv_val else '-'}  |  DO: {do_val if do_val else '-'}", size=12, color=text_color),
-                        ft.Text(f"Bill: {bill_val if bill_val else '-'}", size=12, color=sub_text_color),
                         
-                        ft.Text(f"Cust: {job.get('customer', '-')}", size=14, color=text_color, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS),
-                        ft.Text(f"Type: {job.get('trailer_type', '-')}", size=12, color=sub_text_color, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS),
+                        # CHANGED TO: "Billed by"
+                        ft.Text(f"Billed by: {bill_val if bill_val else '-'}", size=12, color=sub_text_color),
+                        
+                        # REMOVED no_wrap=True and overflow limit so names can wrap!
+                        ft.Text(f"Cust: {job.get('customer', '-')}", size=14, color=text_color),
+                        ft.Text(f"Type: {job.get('trailer_type', '-')}", size=12, color=sub_text_color),
                         ft.Text(f"Price: {job.get('price_text', '-')}", size=12, color=sub_text_color),
                         ft.Text(f"PIC: {job.get('supervisor', '-')}", size=12, color=sub_text_color),
 
                         ft.Divider(height=5, color="transparent"),
-                        ft.Text(f"{job.get('summary', '')}", size=12, italic=True, color=text_color, max_lines=2, overflow="ellipsis"),
+                        ft.Text(f"{job.get('summary', '')}", size=12, italic=True, color=text_color, max_lines=3, overflow="ellipsis"),
                         
                         ft.Row([
                             ft.IconButton(ft.Icons.HISTORY, icon_size=18, icon_color=icon_color, tooltip="View Job History", on_click=lambda e, jc=job['job_code']: view_specific_history(e, jc)),
@@ -658,7 +661,7 @@ def main(page: ft.Page):
                                 ft.Text(f"{STATUS_DICT.get(job['status_idx'], 'Unknown')}", size=12, color=icon_color)
                             ])
                         ], alignment="spaceBetween")
-                    ], scroll=ft.ScrollMode.ADAPTIVE), # Let inner card scroll if font gets way too big
+                    ], spacing=5), 
                     padding=15,
                     on_click=lambda e, j=job: show_job_details(j)
                 )
@@ -713,7 +716,6 @@ def main(page: ft.Page):
         id_label = "Job Code" if category_val == "new" else "Unit ID / Reg No"
         code_val = job['job_code'] if job else f"{'JOB' if category_val=='new' else 'USED'}-{int(datetime.utcnow().timestamp())}"
         
-        # PROFESSIONAL UPGRADE: Responsive Stacking fields
         def responsive_row(controls):
             if is_mobile:
                 return ft.Column(controls, spacing=10)
@@ -814,7 +816,6 @@ def main(page: ft.Page):
                     simple_label = label.split(" - ")[0]
                     row_btns.append(ft.OutlinedButton(simple_label, on_click=lambda e, i=idx: move_status_click(i)))
             
-            # PROFESSIONAL UPGRADE: Stack buttons if mobile, wrap if desktop
             status_buttons.append(ft.Column(row_btns) if is_mobile else ft.Row(row_btns, wrap=True))
             
             if current_s < 9:
@@ -836,7 +837,7 @@ def main(page: ft.Page):
                 t_notes, t_breakdown,
                 ft.Divider(), 
                 ft.Column(status_buttons)
-            ], scroll=ft.ScrollMode.ADAPTIVE, expand=True, spacing=15), # Added spacing for touch targets
+            ], scroll=ft.ScrollMode.ADAPTIVE, expand=True, spacing=15), 
             padding=15, expand=True, alignment=ft.alignment.top_center
         ))
 
