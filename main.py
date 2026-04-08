@@ -47,20 +47,16 @@ def get_mys_iso():
 
 # --- IMAGE COMPRESSION LOGIC ---
 def get_file_bytes_compressed(file_path):
-    """If it's an image, compress it to save mobile data. Otherwise, upload normal."""
     mime_type, _ = mimetypes.guess_type(file_path)
     if mime_type and mime_type.startswith('image'):
         try:
             img = Image.open(file_path)
-            # Remove transparent backgrounds so JPEG compression works
             if img.mode in ("RGBA", "P"): img = img.convert("RGB")
             img_byte_arr = io.BytesIO()
-            # Compress to 60% quality (Massive file size drop, barely noticeable to the eye)
             img.save(img_byte_arr, format='JPEG', quality=60, optimize=True)
             return img_byte_arr.getvalue()
         except Exception as e:
             print(f"Compression skipped due to error: {e}")
-    # If not an image or compression fails, just read normal bytes
     with open(file_path, "rb") as f:
         return f.read()
 
@@ -118,7 +114,9 @@ class DbManager:
             query = self.client.table("job_history").select("*").order("changed_at", desc=True)
             if job_code: query = query.eq("job_code", job_code)
             return query.limit(limit).execute().data
-        except: return []
+        except Exception as e: 
+            print(f"DATABASE FETCH ERROR: {str(e)}") 
+            return [{"changed_by": "SYSTEM ALERT", "job_code": "DB ERROR", "details": f"Fetch failed: {str(e)}", "changed_at": get_mys_iso(), "new_status": 0}]
 
     def create_job(self, data, user):
         if not self.client: return False, "No DB Connection"
@@ -187,7 +185,9 @@ class DbManager:
             log = {"job_id": job_id, "job_code": job_code, "old_status": old_s if old_s is not None else -1, "new_status": new_s if new_s is not None else 0, "changed_by": user, "changed_at": get_mys_iso(), "details": details_text}
             self.client.table("job_history").insert(log).execute()
             return True, None
-        except Exception as e: return False, str(e)
+        except Exception as e: 
+            print(f"DATABASE INSERT ERROR: {str(e)}")
+            return False, str(e)
 
     def fetch_receipts(self, job_id):
         if not self.client: return []
@@ -267,7 +267,6 @@ def main(page: ft.Page):
     active_date_field = [None]
     def on_date_changed(e):
         if active_date_field[0] and e.control.value:
-            # Proper Timezone offset for Calendar selection!
             fixed_date = e.control.value + timedelta(hours=8)
             active_date_field[0].value = fixed_date.strftime("%Y-%m-%d")
             page.update()
@@ -336,28 +335,6 @@ def main(page: ft.Page):
         state["last_view_type"] = "history"
         load_history_view(job['job_code'])
 
-    # --- MOBILE NAVIGATION BAR ---
-    def on_bottom_nav_change(e):
-        idx = e.control.selected_index
-        state["last_local_filter"] = ""; state["scroll_pos"] = 0.0; state["in_details"] = False; state["history_filter_job"] = None 
-        if idx == 0: state["last_view_type"] = "overview"; load_job_list_view("Overview Dashboard")
-        elif idx == 1: state["category"] = "new"; state["last_view_type"] = "overview"; page.drawer = get_drawer(); load_job_list_view("New Construction Dashboard")
-        elif idx == 2: state["category"] = "used"; state["last_view_type"] = "overview"; page.drawer = get_drawer(); load_job_list_view("Used / Refurb Dashboard")
-        elif idx == 3: show_search_view()
-        page.update()
-
-    if is_mobile:
-        page.navigation_bar = ft.NavigationBar(
-            destinations=[
-                ft.NavigationBarDestination(icon=ft.Icons.DASHBOARD, label="Overview"),
-                ft.NavigationBarDestination(icon=ft.Icons.CONSTRUCTION, label="New"),
-                ft.NavigationBarDestination(icon=ft.Icons.CAR_REPAIR, label="Used"),
-                ft.NavigationBarDestination(icon=ft.Icons.SEARCH, label="Search"),
-            ],
-            on_change=on_bottom_nav_change,
-            visible=False # Hidden on login screen
-        )
-
     def get_drawer():
         current_status_list = STATUSES_NEW if state["category"] == "new" else STATUSES_USED
         nav_controls = [
@@ -420,7 +397,7 @@ def main(page: ft.Page):
                 if state["user"] != "" and not state["in_details"]:
                     try:
                         latest_log = db.fetch_history(limit=1)
-                        if latest_log:
+                        if latest_log and "SYSTEM ALERT" not in latest_log[0].get('changed_by', ''):
                             current_latest_id = latest_log[0].get('id')
                             if last_checked_id is None:
                                 last_checked_id = current_latest_id
@@ -451,7 +428,6 @@ def main(page: ft.Page):
 
     def show_login():
         page.clean(); page.appbar = None; page.drawer = None; state["in_details"] = False
-        if page.navigation_bar: page.navigation_bar.visible = False
         
         connection_status = "Connecting..."
         try: directory_data = db.fetch_directory(); connection_status = "Connected to Secure Database" if db.client else "Offline / Connection Error"
@@ -473,7 +449,6 @@ def main(page: ft.Page):
                 state["role"] = role; 
                 warm_up_servers()
                 page.drawer = get_drawer(); 
-                if page.navigation_bar: page.navigation_bar.visible = True
                 reload_current_view() 
             else: status_lbl.value = role; status_lbl.color = "red"; page.update()
 
@@ -488,7 +463,6 @@ def main(page: ft.Page):
             success, role = db.login("guest@kanban.admin", "guestview123")
             if success: 
                 state["user"] = "Guest Visitor"; state["role"] = role; page.drawer = get_drawer()
-                if page.navigation_bar: page.navigation_bar.visible = True
                 reload_current_view()
             else: e.control.disabled = False; status_lbl.value = "Guest account not set up in Auth!"; status_lbl.color = "red"; page.update()
 
@@ -509,7 +483,6 @@ def main(page: ft.Page):
 
     def show_search_view():
         page.clean(); state["last_local_filter"] = ""; state["in_details"] = False
-        if page.navigation_bar: page.navigation_bar.visible = True
         
         def run_search(e=None):
             if not search_box.value: return
@@ -551,23 +524,32 @@ def main(page: ft.Page):
 
     def load_live_feed_view():
         page.clean(); state["in_details"] = False; limit = state.get("feed_limit", 50)
-        if page.navigation_bar: page.navigation_bar.visible = True
         
         def change_limit(e): state["feed_limit"] = int(e.control.value); load_live_feed_view()
         def change_user_filter(e): state["feed_user_filter"] = e.control.value; load_live_feed_view()
 
         def on_feed_click(e, j_code):
+            if j_code == "DB ERROR": return
             real_job_data = db.fetch_single_job(j_code)
             if real_job_data: show_job_details(real_job_data)
             else: show_snack(f"Could not open {j_code}. It has been permanently deleted.", is_error=True)
 
         dd_limit = ft.Dropdown(label="Event Limit", options=[
             ft.dropdown.Option("50", "Last 50 Events"),
-            ft.dropdown.Option("200", "Last 200 Events") 
+            ft.dropdown.Option("200", "Last 200 Events"),
+            ft.dropdown.Option("1000", "Last 1000 Events")
         ], value=str(limit), expand=True, on_change=change_limit)
 
-        txt_user_filter = ft.TextField(label="Filter by User", value=state.get("feed_user_filter", ""), on_change=change_user_filter, expand=True)
+        # Grab the master list of users from the database
+        try: directory_data = db.fetch_directory()
+        except Exception: directory_data = []
         
+        # Create the dropdown options, starting with an "All Users" option
+        user_options = [ft.dropdown.Option("", "All Users")] 
+        for u in directory_data:
+            user_options.append(ft.dropdown.Option(u['display_name']))
+
+        dd_user_filter = ft.Dropdown(label="Filter by User", options=user_options, value=state.get("feed_user_filter", ""), on_change=change_user_filter, expand=True)
         page.appbar = ft.AppBar(leading=ft.IconButton(ft.Icons.MENU, on_click=safe_open_drawer), title=ft.Text("Live Activity Feed"), bgcolor="blue", color="white")
         
         history_logs = db.fetch_history(limit=limit) 
@@ -579,43 +561,49 @@ def main(page: ft.Page):
             render_count = 0
 
             for log in history_logs:
-                user = log.get('changed_by', 'System')
-                if u_filter and u_filter not in user.lower(): continue
-                render_count += 1
-                job_c = log.get('job_code', 'Unknown'); old_s = STATUS_DICT.get(log.get('old_status'), '?')
-                new_s_id = log.get('new_status')
-                if new_s_id == 8: new_s = "Closed"
-                elif new_s_id == 9: new_s = "Deleted"
-                else: new_s = STATUS_DICT.get(new_s_id, 'Unknown')
+                try:
+                    user = log.get('changed_by', 'System')
+                    if u_filter and u_filter not in user.lower(): continue
+                    render_count += 1
+                    job_c = log.get('job_code', 'Unknown'); old_s = STATUS_DICT.get(log.get('old_status'), '?')
+                    new_s_id = log.get('new_status')
+                    if new_s_id == 8: new_s = "Closed"
+                    elif new_s_id == 9: new_s = "Deleted"
+                    else: new_s = STATUS_DICT.get(new_s_id, 'Unknown')
 
-                raw_time = str(log.get('changed_at', '')); time_str = raw_time.replace('T', ' ')[:16] if raw_time else ""
-                details = log.get('details', '')
-                if details: msg = details
-                elif log.get('old_status') == -1: msg = "Job Created"
-                elif log.get('old_status') != log.get('new_status'): msg = f"{old_s} -> {new_s}"
-                else: msg = "Edited"
-                
-                is_deleted = new_s_id == 9 or "PERMANENTLY WIPED" in msg
-                bg_color = ft.Colors.RED_50 if is_deleted else ft.Colors.GREY_100
-                feed_list.controls.append(ft.Container(
-                    content=ft.Row([
-                        ft.Icon(ft.Icons.HISTORY if not is_deleted else ft.Icons.WARNING, size=18, color=ft.Colors.RED if is_deleted else "blue"), 
-                        ft.Text(f"{time_str} | ", size=14, color="grey", weight="bold"), 
-                        ft.Text(f"{user} updated ", size=14, color="grey"), 
-                        ft.Text(f"{job_c}: ", size=14, weight="bold", color=ft.Colors.RED_900 if is_deleted else "black"), 
-                        ft.Text(f"{msg}", size=14, color=ft.Colors.RED_900 if is_deleted else "black87")
-                    ], vertical_alignment="center", wrap=True), 
-                    bgcolor=bg_color, padding=15, border_radius=8, ink=True, 
-                    on_click=lambda e, jc=job_c: on_feed_click(e, jc)
-                ))
+                    raw_time = str(log.get('changed_at', '')); time_str = raw_time.replace('T', ' ')[:16] if raw_time else ""
+                    details = log.get('details', '')
+                    if details: msg = details
+                    elif log.get('old_status') == -1: msg = "Job Created"
+                    elif log.get('old_status') != log.get('new_status'): msg = f"{old_s} -> {new_s}"
+                    else: msg = "Edited"
+                    
+                    is_error = user == "SYSTEM ALERT"
+                    is_deleted = new_s_id == 9 or "PERMANENTLY WIPED" in msg
+                    bg_color = ft.Colors.RED_50 if (is_deleted or is_error) else ft.Colors.GREY_100
+                    
+                    feed_list.controls.append(ft.Container(
+                        content=ft.Row([
+                            ft.Icon(ft.Icons.ERROR if is_error else (ft.Icons.HISTORY if not is_deleted else ft.Icons.WARNING), size=18, color=ft.Colors.RED if (is_deleted or is_error) else "blue"), 
+                            ft.Text(f"{time_str} | ", size=14, color="grey", weight="bold"), 
+                            ft.Text(f"{user} " + ("reported " if is_error else "updated "), size=14, color="grey"), 
+                            ft.Text(f"{job_c}: ", size=14, weight="bold", color=ft.Colors.RED_900 if (is_deleted or is_error) else "black"), 
+                            ft.Text(f"{msg}", size=14, color=ft.Colors.RED_900 if (is_deleted or is_error) else "black87")
+                        ], vertical_alignment="center", wrap=True), 
+                        bgcolor=bg_color, padding=15, border_radius=8, ink=not is_error, 
+                        on_click=lambda e, jc=job_c: on_feed_click(e, jc)
+                    ))
+                except Exception as ex:
+                    print(f"Skipped a corrupted log entry: {ex}")
 
             if render_count == 0: feed_list.controls.append(ft.Text("No activity matches this user filter.", color="grey", text_align="center"))
 
-        page.add(ft.Container(content=ft.Column([ft.Container(content=ft.Row([dd_limit, txt_user_filter], wrap=True), padding=10), ft.Divider(height=1, color="grey"), feed_list], expand=True), expand=True))
+        # FIX: Removed 'wrap=True' from the row holding the dropdown and text filter!
+        page.add(ft.Container(content=ft.Column([ft.Container(content=ft.Row([dd_limit, dd_user_filter]), padding=10), ft.Divider(height=1, color="grey"), feed_list], expand=True), expand=True))
+        page.update()
 
     def load_job_list_view(title, is_global_search=False):
         page.clean(); state["in_details"] = False
-        if page.navigation_bar: page.navigation_bar.visible = True
         current_status_list = STATUSES_NEW if state["category"] == "new" else STATUSES_USED
 
         appbar_actions = []
@@ -645,7 +633,7 @@ def main(page: ft.Page):
             def open_status_view(idx):
                 state["last_view_type"] = "status"; state["last_status_idx"] = idx; state["last_local_filter"] = ""; state["scroll_pos"] = 0.0; reload_current_view()
 
-            dash_cols = 1; dash_ratio = 6.5
+            dash_cols = 1; dash_ratio = 4.5 
             dashboard_col = ft.GridView(expand=True, runs_count=dash_cols, child_aspect_ratio=dash_ratio, spacing=10, run_spacing=10, padding=10)
             
             for idx, label in current_status_list:
@@ -757,7 +745,6 @@ def main(page: ft.Page):
 
     def show_job_details(job):
         page.clean(); state["in_details"] = True 
-        if page.navigation_bar: page.navigation_bar.visible = False # Hide bottom nav when in details
 
         is_new = job is None
         is_readonly = state["role"] != "admin"
@@ -770,7 +757,7 @@ def main(page: ft.Page):
         category_val = job.get('category', state["category"]) if job else state["category"]
         id_label = "Job Code" if category_val == "new" else "Unit ID / Reg No"
         code_val = job['job_code'] if job else f"{'JOB' if category_val=='new' else 'USED'}-{int(datetime.now(timezone.utc).timestamp())}"
-
+        
         def responsive_row(controls): return ft.Column(controls, spacing=10)
         def close_any_dialog(dlg): page.close(dlg); page.update()
 
@@ -784,7 +771,6 @@ def main(page: ft.Page):
         t_cust = ft.TextField(label="Customer", value=job.get('customer','') if job else "")
         t_pic = ft.TextField(label="PIC / Supervisor", value=job.get('supervisor','') if job else "")
         t_type = ft.TextField(label="Trailer/Unit Type", value=job.get('trailer_type','') if job else "")
-        # Updated to number keyboard for price
         t_price = ft.TextField(label="Price (Total)", value=job.get('price_text','') if job else "", keyboard_type=ft.KeyboardType.NUMBER)
         t_summary = ft.TextField(label="Summary", value=job.get('summary','') if job else "")
         t_notes = ft.TextField(label="Production Notes", value=job.get('notes','') if job else "", multiline=True, min_lines=3)
@@ -801,7 +787,7 @@ def main(page: ft.Page):
         row_edit_date = ft.Row([dlg_edit_date, btn_cal_edit])
         
         dlg_edit_no = ft.TextField(label="Receipt Number")
-        dlg_edit_amt = ft.TextField(label="Amount (RM)", keyboard_type=ft.KeyboardType.NUMBER) # Number keyboard
+        dlg_edit_amt = ft.TextField(label="Amount (RM)", keyboard_type=ft.KeyboardType.NUMBER) 
 
         def save_edited_receipt(e):
             if not dlg_edit_no.value or not dlg_edit_amt.value or not dlg_edit_date.value: show_snack("Please fill all receipt fields", is_error=True); return
@@ -810,7 +796,6 @@ def main(page: ft.Page):
 
             e.control.disabled = True; page.update()
 
-            # TIMEZONE FIX: Set time to 12:00:00 to prevent rolling back a day in UTC
             db_ready_date = f"{dlg_edit_date.value}T12:00:00+08:00"
             new_data = {"receipt_no": dlg_edit_no.value, "amount_paid": amt_val, "payment_date": db_ready_date}
             
@@ -885,7 +870,7 @@ def main(page: ft.Page):
         row_add_date = ft.Row([dlg_add_date, btn_cal_add])
         
         dlg_add_no = ft.TextField(label="Receipt Number")
-        dlg_add_amt = ft.TextField(label="Amount (RM)", keyboard_type=ft.KeyboardType.NUMBER) # Number Keyboard
+        dlg_add_amt = ft.TextField(label="Amount (RM)", keyboard_type=ft.KeyboardType.NUMBER)
 
         def save_new_receipt(e):
             if not dlg_add_no.value or not dlg_add_amt.value or not dlg_add_date.value: show_snack("Please fill date, receipt no, and amount", is_error=True); return
@@ -894,7 +879,6 @@ def main(page: ft.Page):
 
             e.control.disabled = True; page.update()
 
-            # TIMEZONE FIX: Set time to 12:00:00 to prevent rolling back a day in UTC
             db_ready_date = f"{dlg_add_date.value}T12:00:00+08:00"
             rec_data = {"job_id": current_job_id, "receipt_no": dlg_add_no.value, "amount_paid": amt_val, "payment_date": db_ready_date}
             current_total = job.get('total_paid', 0) if job else 0
@@ -997,9 +981,7 @@ def main(page: ft.Page):
                     upload_url = res_data.get("url")
                     
                     if upload_url:
-                        # USING OUR NEW IMAGE COMPRESSION HERE!
                         file_data = get_file_bytes_compressed(picked_file.path)
-                        
                         cf_res = requests.put(upload_url, data=file_data)
                         
                         if cf_res.status_code == 200:
@@ -1024,22 +1006,18 @@ def main(page: ft.Page):
 
         global_file_picker.on_result = on_file_picked
         
-        # --- NEW TWO-BUTTON UPLOAD SYSTEM ---
         def trigger_upload_photo(e):
             if is_new: show_snack("You must SAVE the Job Card first before adding files!", is_error=True); return
-            # This line forces Flet to only look for images. On mobile, this usually triggers the Camera!
             global_file_picker.pick_files(allow_multiple=True, file_type=ft.FilePickerFileType.IMAGE)
 
         def trigger_upload_doc(e):
             if is_new: show_snack("You must SAVE the Job Card first before adding files!", is_error=True); return
-            # This restricts the file picker to standard document formats
             global_file_picker.pick_files(allow_multiple=True, allowed_extensions=["pdf", "doc", "docx", "xls", "xlsx", "txt", "csv"])
 
-        btn_photo = ft.ElevatedButton("Camera / Photos", icon=ft.Icons.CAMERA_ALT, on_click=trigger_upload_photo, bgcolor="blue", color="white")
+        btn_photo = ft.ElevatedButton("Upload Photo", icon=ft.Icons.CAMERA_ALT, on_click=trigger_upload_photo, bgcolor="blue", color="white")
         btn_doc = ft.ElevatedButton("Upload PDF / Doc", icon=ft.Icons.PICTURE_AS_PDF, on_click=trigger_upload_doc)
         
         upload_buttons = ft.Column([btn_photo, btn_doc]) if not is_readonly else ft.Container()
-        # ------------------------------------
 
         attachments_section = ft.Container(content=ft.Column([ft.Text("Documents & Attachments", weight="bold", color="blue"), upload_progress, upload_buttons, attachments_list]), padding=10, border=ft.border.all(1, "blue"), border_radius=8)
 
@@ -1114,7 +1092,7 @@ def main(page: ft.Page):
             row_btns = []
             for idx, label in btns_to_show:
                 if idx < 8 and idx != current_s: row_btns.append(ft.OutlinedButton(label.split(" - ")[0], on_click=lambda e, i=idx: move_status_click(e, i)))
-            status_buttons.append(ft.Column(row_btns) if is_mobile else ft.Row(row_btns, wrap=True))
+            status_buttons.append(ft.Column(row_btns))
             
             if current_s < 9:
                 status_buttons.append(ft.Divider())
@@ -1143,7 +1121,6 @@ def main(page: ft.Page):
 
     def load_history_view(job_code_filter=None):
         page.clean(); state["in_details"] = False; state["history_filter_job"] = job_code_filter
-        if page.navigation_bar: page.navigation_bar.visible = True
         title_str = f"History: {job_code_filter}" if job_code_filter else "Global System History"
         
         leading_icon = ft.IconButton(ft.Icons.ARROW_BACK, on_click=lambda e: handle_back_button()) if job_code_filter else ft.IconButton(ft.Icons.MENU, on_click=safe_open_drawer)
@@ -1155,21 +1132,24 @@ def main(page: ft.Page):
         if not logs: lv.controls.append(ft.Text("No history found.", text_align="center"))
 
         for log in logs:
-            job_c = log.get('job_code', 'Unknown'); user = log.get('changed_by', 'System'); old_s = STATUS_DICT.get(log.get('old_status'), '?')
-            new_s_id = log.get('new_status')
-            if new_s_id == 8: new_s = "Closed"
-            elif new_s_id == 9: new_s = "Deleted"
-            else: new_s = STATUS_DICT.get(new_s_id, 'Unknown')
+            try:
+                job_c = log.get('job_code', 'Unknown'); user = log.get('changed_by', 'System'); old_s = STATUS_DICT.get(log.get('old_status'), '?')
+                new_s_id = log.get('new_status')
+                if new_s_id == 8: new_s = "Closed"
+                elif new_s_id == 9: new_s = "Deleted"
+                else: new_s = STATUS_DICT.get(new_s_id, 'Unknown')
 
-            raw_time = str(log.get('changed_at', '')); time = raw_time.replace('T', ' ')[:16] if raw_time else ""
-            details = log.get('details', '')
-            if details: msg = details
-            elif log.get('old_status') == -1: msg = "Job Created"
-            elif log.get('old_status') != log.get('new_status'): msg = f"{old_s} -> {new_s}"
-            else: msg = "Edited"
-            
-            tile = ft.Container(content=ft.Column([ft.Row([ft.Text(job_c, weight="bold"), ft.Text(time, size=10, color="grey")], alignment="spaceBetween"), ft.Text(f"{user}: {msg}", size=12)]), padding=10, bgcolor=ft.Colors.GREY_100, border_radius=5)
-            lv.controls.append(tile)
+                raw_time = str(log.get('changed_at', '')); time = raw_time.replace('T', ' ')[:16] if raw_time else ""
+                details = log.get('details', '')
+                if details: msg = details
+                elif log.get('old_status') == -1: msg = "Job Created"
+                elif log.get('old_status') != log.get('new_status'): msg = f"{old_s} -> {new_s}"
+                else: msg = "Edited"
+                
+                tile = ft.Container(content=ft.Column([ft.Row([ft.Text(job_c, weight="bold"), ft.Text(time, size=10, color="grey")], alignment="spaceBetween"), ft.Text(f"{user}: {msg}", size=12)]), padding=10, bgcolor=ft.Colors.GREY_100, border_radius=5)
+                lv.controls.append(tile)
+            except Exception as e:
+                print(f"Skipped bad history view log: {e}")
         
         page.add(ft.Container(content=lv, alignment=ft.alignment.top_center, expand=True))
 
