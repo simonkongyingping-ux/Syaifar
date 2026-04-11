@@ -291,7 +291,10 @@ def main(page: ft.Page):
 
     # --- QUIT DIALOG ---
     def confirm_quit(e):
-        page.window.close()
+        if is_mobile:
+            os._exit(0)  # Instantly kills the Python engine on Android
+        else:
+            page.window.close()  # Gracefully closes the window on Desktop
 
     quit_dialog = ft.AlertDialog(
         title=ft.Text("Quit App", color="red"),
