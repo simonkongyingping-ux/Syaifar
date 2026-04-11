@@ -45,7 +45,7 @@ SEARCHABLE_FIELDS = {
 def get_mys_iso():
     return (datetime.now(timezone.utc) + timedelta(hours=8)).isoformat()
 
-# --- UPDATED IMAGE COMPRESSION LOGIC ---
+# --- IMAGE COMPRESSION LOGIC ---
 def get_file_bytes_compressed(file_path, original_name):
     mime_type, _ = mimetypes.guess_type(original_name)
     if mime_type and mime_type.startswith('image'):
@@ -109,6 +109,14 @@ class DbManager:
             return None
         except Exception: return None
 
+    def fetch_job_by_id(self, job_id):
+        if not self.client: return None
+        try:
+            res = self.client.table("memo_system").select("*").eq("id", job_id).execute()
+            if res.data: return res.data[0] 
+            return None
+        except Exception: return None
+
     def fetch_history(self, job_code=None, limit=50): 
         if not self.client: return []
         try:
@@ -116,7 +124,6 @@ class DbManager:
             if job_code: query = query.eq("job_code", job_code)
             return query.limit(limit).execute().data
         except Exception as e: 
-            print(f"DATABASE FETCH ERROR: {str(e)}") 
             return [{"changed_by": "SYSTEM ALERT", "job_code": "DB ERROR", "details": f"Fetch failed: {str(e)}", "changed_at": get_mys_iso(), "new_status": 0}]
 
     def create_job(self, data, user):
@@ -168,8 +175,7 @@ class DbManager:
                     if link:
                         try:
                             self.client.functions.invoke("bright-action", invoke_options={"body": {"file_link": link}})
-                        except Exception as ex:
-                            print(f"Failed to wipe {link} from Cloudflare: {ex}")
+                        except Exception as ex: pass
 
             self.client.table("job_receipts").delete().eq("job_id", job_id).execute()
             self.client.table("job_attachments").delete().eq("job_id", job_id).execute()
@@ -185,8 +191,7 @@ class DbManager:
             log = {"job_id": job_id, "job_code": job_code, "old_status": old_s if old_s is not None else -1, "new_status": new_s if new_s is not None else 0, "changed_by": user, "changed_at": get_mys_iso(), "details": details_text}
             self.client.table("job_history").insert(log).execute()
             return True, None
-        except Exception as e: 
-            return False, str(e)
+        except Exception as e: return False, str(e)
 
     def fetch_receipts(self, job_id):
         if not self.client: return []
@@ -254,22 +259,26 @@ db = DbManager()
 # --- MAIN APP ---
 def main(page: ft.Page):
     is_mobile = page.platform in [ft.PagePlatform.ANDROID, ft.PagePlatform.IOS]
-
     page.theme_mode = ft.ThemeMode.LIGHT
     page.padding = 5 if is_mobile else 0
     page.title = f"Syaifar's Kanban {APP_VERSION}"
     if not is_mobile: page.window.min_width = 1000; page.window.min_height = 700; page.window.center()
 
-    # --- TRUE FLET ROUTING HELPERS (FIXES THE WHITE SCREEN BUG) ---
+    # --- THE BASE TRAP (Prevents Android from killing the app on root back button) ---
+    page.views.clear()
+    page.views.append(ft.View(route="/base", controls=[ft.Container(bgcolor="white", expand=True)]))
+
+    # --- TRUE FLET ROUTING HELPERS ---
     def render_root(appbar, content):
-        """Clears the stack and lays down a clean single page. Used for Dashboards."""
-        page.views.clear()
-        view = ft.View(route="/", appbar=appbar, controls=[content], padding=page.padding, drawer=page.drawer)
+        """Wipes down to the base trap, then lays down a clean dashboard layer (Layer 2)."""
+        while len(page.views) > 1:
+            page.views.pop()
+        view = ft.View(route="/main", appbar=appbar, controls=[content], padding=page.padding, drawer=page.drawer)
         page.views.append(view)
         page.update()
 
     def push_view(route, appbar, content):
-        """Pushes a new view on top of the stack. Used for Job Details & History."""
+        """Pushes a new view (Layer 3+) on top of the stack. Used for Job Details & History."""
         view = ft.View(route=route, appbar=appbar, controls=[content], padding=page.padding)
         page.views.append(view)
         page.update()
@@ -279,6 +288,19 @@ def main(page: ft.Page):
         if len(page.views) > 0 and page.views[-1].drawer:
             return page.views[-1].drawer
         return page.drawer
+
+    # --- QUIT DIALOG ---
+    def confirm_quit(e):
+        page.window.close()
+
+    quit_dialog = ft.AlertDialog(
+        title=ft.Text("Quit App", color="red"),
+        content=ft.Text("Are you sure you want to exit Syaifar's Kanban?"),
+        actions=[
+            ft.TextButton("Cancel", on_click=lambda e: page.close(quit_dialog)),
+            ft.ElevatedButton("Exit", color="white", bgcolor="red", on_click=confirm_quit)
+        ]
+    )
 
     global_file_picker = ft.FilePicker()
     page.overlay.append(global_file_picker)
@@ -290,76 +312,62 @@ def main(page: ft.Page):
             active_date_field[0].value = fixed_date.strftime("%Y-%m-%d")
             page.update()
 
-    global_date_picker = ft.DatePicker(
-        first_date=datetime(2020, 1, 1),
-        last_date=datetime(2040, 12, 31),
-        on_change=on_date_changed
-    )
+    global_date_picker = ft.DatePicker(first_date=datetime(2020, 1, 1), last_date=datetime(2040, 12, 31), on_change=on_date_changed)
     page.overlay.append(global_date_picker)
 
     def open_date_picker(e, text_field):
         active_date_field[0] = text_field
-        try: 
-            clean_date = datetime.strptime(text_field.value, "%Y-%m-%d")
-            global_date_picker.value = clean_date
-        except: 
-            global_date_picker.value = datetime.now()
+        try: global_date_picker.value = datetime.strptime(text_field.value, "%Y-%m-%d")
+        except: global_date_picker.value = datetime.now()
         page.open(global_date_picker)
         page.update()
 
     state = {
         "user": "", "role": "", "category": "new", "last_view_type": "overview", 
         "last_status_idx": None, "last_search_term": "", "active_search_fields": list(SEARCHABLE_FIELDS.keys()), 
-        "last_local_filter": "", "history_filter_job": None, 
-        "feed_limit": 50, "feed_user_filter": "", 
-        "scroll_pos": 0.0, "in_details": False, 
-        "pre_history_view_type": None, "pre_history_in_details": False, "pre_history_job": None
+        "last_local_filter": "", "history_filter_job": None, "feed_limit": 50, "feed_user_filter": "", 
+        "scroll_pos": 0.0, "in_details": False, "pre_history_view_type": None, "pre_history_in_details": False, "pre_history_job": None
     }
 
-    def handle_back_button(e=None):
-        try:
-            active_drawer = get_active_drawer()
-            if active_drawer and active_drawer.open: 
-                active_drawer.open = False
-                page.update()
-                return True
-            
-            if state["last_view_type"] == "history" and state.get("history_filter_job"):
-                was_in_details = state.get("pre_history_in_details", False)
-                job_to_return = state.get("pre_history_job")
-                state["last_view_type"] = state.get("pre_history_view_type", "overview")
-                state["pre_history_job"] = None
-                
-                if was_in_details and job_to_return: 
-                    reload_current_view() # Reset back to dashboard
-                    show_job_details(job_to_return) # Push details back on top
-                else: 
-                    state["in_details"] = False
-                    reload_current_view()
-                return True
+    # --- THE MAGIC ANDROID BACK BUTTON LISTENER ---
+    def on_android_back(e=None):
+        active_drawer = get_active_drawer()
+        if active_drawer and active_drawer.open: 
+            active_drawer.open = False
+            page.update()
+            return
 
-            if state["in_details"]: 
-                state["in_details"] = False
-                reload_current_view()
-                return True
-                
-            if state["user"] != "" and state["last_view_type"] != "overview": 
+        # Condition A: We are deep in the app (Job Details, History, etc)
+        if len(page.views) > 2:
+            popped_view = page.views.pop()
+            state["in_details"] = False
+            page.update()
+            return
+            
+        # Condition B: We are on the Main Layer
+        elif len(page.views) == 2:
+            # Not logged in? Exit.
+            if state["user"] == "":
+                page.window.close()
+                return
+
+            # Logged in, but NOT on Overview Dashboard? Instantly route back to Overview.
+            if state["last_view_type"] != "overview":
                 state["last_view_type"] = "overview"
-                load_job_list_view("Overview Dashboard")
-                return True
-                
-            return False
-        except Exception: return False
+                reload_current_view()
+                return
+            
+            # Logged in, AND on Overview Dashboard? Ask to quit.
+            elif state["last_view_type"] == "overview":
+                page.open(quit_dialog)
+                page.update()
+                return
+
+    page.on_view_pop = on_android_back
 
     def on_keyboard(e: ft.KeyboardEvent):
-        if e.key == "Escape": handle_back_button()
+        if e.key == "Escape": on_android_back()
     page.on_keyboard_event = on_keyboard
-
-    # --- THE MAGIC ANDROID BACK BUTTON LISTENER ---
-    def on_android_back(e):
-        handle_back_button()
-    page.on_view_pop = on_android_back
-    page.update()
 
     def show_snack(msg, is_error=False):
         snack = ft.SnackBar(content=ft.Text(msg), bgcolor=ft.Colors.RED if is_error else ft.Colors.GREEN)
@@ -421,9 +429,8 @@ def main(page: ft.Page):
             elif idx == (5 + status_count + 3): state["user"] = ""; show_login(); return
 
             active_drawer = get_active_drawer()
-            if active_drawer:
-                active_drawer.open = False
-                page.update()
+            if active_drawer: active_drawer.open = False
+            page.update()
         except Exception as ex: print(f"Nav Error: {ex}")
 
     def warm_up_servers():
@@ -431,7 +438,7 @@ def main(page: ft.Page):
             try:
                 db.client.functions.invoke("clever-action", invoke_options={"body": {"action": "ping"}})
                 db.client.functions.invoke("bright-action", invoke_options={"body": {"action": "ping"}})
-            except Exception as e: print(f"Warm up failed: {e}")
+            except Exception as e: pass
         t = threading.Thread(target=ping_worker, daemon=True)
         t.start()
 
@@ -541,18 +548,15 @@ def main(page: ft.Page):
         
         def on_filter_toggle(e):
             field_key = e.control.data; is_checked = e.control.value
-            if is_checked and field_key not in state["active_search_fields"]: 
-                state["active_search_fields"].append(field_key)
-            elif not is_checked and field_key in state["active_search_fields"]: 
-                state["active_search_fields"].remove(field_key)
+            if is_checked and field_key not in state["active_search_fields"]: state["active_search_fields"].append(field_key)
+            elif not is_checked and field_key in state["active_search_fields"]: state["active_search_fields"].remove(field_key)
 
         filter_checkboxes = [ft.Checkbox(label=friendly_name, value=(field_key in state["active_search_fields"]), data=field_key, on_change=on_filter_toggle) for field_key, friendly_name in SEARCHABLE_FIELDS.items()]
         
         filter_expander = ft.ExpansionTile(
             title=ft.Text("Refine Search (Check boxes to look in specific fields)", size=12, color="blue", italic=True), 
             controls=[ft.Container(content=ft.Row(filter_checkboxes, wrap=True), padding=10)], 
-            collapsed_text_color="grey", 
-            text_color="blue"
+            collapsed_text_color="grey", text_color="blue"
         )
 
         my_appbar = ft.AppBar(leading=ft.IconButton(ft.Icons.MENU, on_click=safe_open_drawer), title=ft.Text("Global Search"), bgcolor="blue", color="white")
@@ -560,12 +564,10 @@ def main(page: ft.Page):
         main_content = ft.Container(
             content=ft.Column([
                 ft.Row([search_box, search_btn], spacing=5), 
-                filter_expander,
-                ft.Divider(),
+                filter_expander, ft.Divider(),
                 ft.Text("Type a keyword and press Enter to begin.", color="grey", size=12, italic=True)
             ], scroll=ft.ScrollMode.ADAPTIVE), 
-            padding=10, 
-            expand=True
+            padding=10, expand=True
         )
 
         render_root(my_appbar, main_content)
@@ -578,24 +580,19 @@ def main(page: ft.Page):
         def change_limit(e): state["feed_limit"] = int(e.control.value); load_live_feed_view()
         def change_user_filter(e): state["feed_user_filter"] = e.control.value; load_live_feed_view()
 
-        def on_feed_click(e, j_code):
-            if j_code == "DB ERROR": return
-            real_job_data = db.fetch_single_job(j_code)
+        def on_feed_click(e, j_id, j_code):
+            if j_code == "DB ERROR" or not j_id: return
+            real_job_data = db.fetch_job_by_id(j_id)
             if real_job_data: show_job_details(real_job_data)
             else: show_snack(f"Could not open {j_code}. It has been permanently deleted.", is_error=True)
 
-        dd_limit = ft.Dropdown(label="Event Limit", options=[
-            ft.dropdown.Option("50", "Last 50 Events"),
-            ft.dropdown.Option("200", "Last 200 Events"),
-            ft.dropdown.Option("1000", "Last 1000 Events")
-        ], value=str(limit), expand=True, on_change=change_limit)
+        dd_limit = ft.Dropdown(label="Event Limit", options=[ft.dropdown.Option("50", "Last 50 Events"), ft.dropdown.Option("200", "Last 200 Events"), ft.dropdown.Option("1000", "Last 1000 Events")], value=str(limit), expand=True, on_change=change_limit)
 
         try: directory_data = db.fetch_directory()
         except Exception: directory_data = []
         
         user_options = [ft.dropdown.Option("", "All Users")] 
-        for u in directory_data:
-            user_options.append(ft.dropdown.Option(u['display_name']))
+        for u in directory_data: user_options.append(ft.dropdown.Option(u['display_name']))
 
         dd_user_filter = ft.Dropdown(label="Filter by User", options=user_options, value=state.get("feed_user_filter", ""), on_change=change_user_filter, expand=True)
         my_appbar = ft.AppBar(leading=ft.IconButton(ft.Icons.MENU, on_click=safe_open_drawer), title=ft.Text("Live Activity Feed"), bgcolor="blue", color="white")
@@ -613,8 +610,11 @@ def main(page: ft.Page):
                     user = log.get('changed_by', 'System')
                     if u_filter and u_filter not in user.lower(): continue
                     render_count += 1
-                    job_c = log.get('job_code', 'Unknown'); old_s = STATUS_DICT.get(log.get('old_status'), '?')
+                    job_c = log.get('job_code', 'Unknown')
+                    j_id = log.get('job_id')
+                    old_s = STATUS_DICT.get(log.get('old_status'), '?')
                     new_s_id = log.get('new_status')
+                    
                     if new_s_id == 8: new_s = "Closed"
                     elif new_s_id == 9: new_s = "Deleted"
                     else: new_s = STATUS_DICT.get(new_s_id, 'Unknown')
@@ -639,10 +639,9 @@ def main(page: ft.Page):
                             ft.Text(f"{msg}", size=14, color=ft.Colors.RED_900 if (is_deleted or is_error) else "black87")
                         ], vertical_alignment="center", wrap=True), 
                         bgcolor=bg_color, padding=15, border_radius=8, ink=not is_error, 
-                        on_click=lambda e, jc=job_c: on_feed_click(e, jc)
+                        on_click=lambda e, jid=j_id, jc=job_c: on_feed_click(e, jid, jc)
                     ))
-                except Exception as ex:
-                    print(f"Skipped a corrupted log entry: {ex}")
+                except Exception as ex: print(f"Skipped a corrupted log entry: {ex}")
 
             if render_count == 0: feed_list.controls.append(ft.Text("No activity matches this user filter.", color="grey", text_align="center"))
 
@@ -680,7 +679,7 @@ def main(page: ft.Page):
             def open_status_view(idx):
                 state["last_view_type"] = "status"; state["last_status_idx"] = idx; state["last_local_filter"] = ""; state["scroll_pos"] = 0.0; reload_current_view()
 
-            dash_cols = 1; dash_ratio = 4.5 
+            dash_cols = 1; dash_ratio = 2
             dashboard_col = ft.GridView(expand=True, runs_count=dash_cols, child_aspect_ratio=dash_ratio, spacing=10, run_spacing=10, padding=10)
             
             for idx, label in current_status_list:
@@ -756,19 +755,12 @@ def main(page: ft.Page):
             
             def on_filter_toggle(e):
                 field_key = e.control.data; is_checked = e.control.value
-                if is_checked and field_key not in state["active_search_fields"]: 
-                    state["active_search_fields"].append(field_key)
-                elif not is_checked and field_key in state["active_search_fields"]: 
-                    state["active_search_fields"].remove(field_key)
+                if is_checked and field_key not in state["active_search_fields"]: state["active_search_fields"].append(field_key)
+                elif not is_checked and field_key in state["active_search_fields"]: state["active_search_fields"].remove(field_key)
 
             filter_checkboxes = [ft.Checkbox(label=friendly_name, value=(field_key in state["active_search_fields"]), data=field_key, on_change=on_filter_toggle) for field_key, friendly_name in SEARCHABLE_FIELDS.items()]
             
-            filter_expander = ft.ExpansionTile(
-                title=ft.Text("Refine Search (Check boxes to look in specific fields)", size=12, color="blue", italic=True), 
-                controls=[ft.Container(content=ft.Row(filter_checkboxes, wrap=True), padding=10)], 
-                collapsed_text_color="grey", 
-                text_color="blue"
-            )
+            filter_expander = ft.ExpansionTile(title=ft.Text("Refine Search (Check boxes to look in specific fields)", size=12, color="blue", italic=True), controls=[ft.Container(content=ft.Row(filter_checkboxes, wrap=True), padding=10)], collapsed_text_color="grey", text_color="blue")
             top_bar = ft.Column([ft.Row([search_input, search_btn], spacing=5), filter_expander])
             draw_cards(jobs)
         else:
@@ -1032,7 +1024,6 @@ def main(page: ft.Page):
                             continue
 
                         file_data = get_file_bytes_compressed(picked_file.path, picked_file.name)
-                        
                         cf_res = requests.put(upload_url, data=file_data)
                         
                         if cf_res.status_code == 200:
@@ -1046,8 +1037,7 @@ def main(page: ft.Page):
                             else: show_snack(f"Failed to save {picked_file.name} to DB: {db_err}", is_error=True)
                         else: show_snack(f"Cloudflare rejected {picked_file.name}: {cf_res.text}", is_error=True)
                     else: show_snack(f"Edge function failed for {picked_file.name}", is_error=True)
-                except Exception as ex:
-                    show_snack(f"Upload crashed for {picked_file.name}: {str(ex)}", is_error=True)
+                except Exception as ex: show_snack(f"Upload crashed for {picked_file.name}: {str(ex)}", is_error=True)
             
             if success_count > 0:
                 show_snack(f"{success_count} Document(s) Uploaded Securely!")
@@ -1122,7 +1112,7 @@ def main(page: ft.Page):
             if success:
                 show_snack(f"Job {job['job_code']} permanently wiped from Database.")
                 close_any_dialog(confirm_hard_del_dialog)
-                handle_back_button() 
+                on_android_back() 
             else: show_snack(f"Failed to hard delete: {err}", is_error=True); page.update()
 
         confirm_hard_del_dialog = ft.AlertDialog(title=ft.Text("DANGER: Confirm Delete", color="red"), content=ft.Text("Are you sure you want to permanently delete this entire job? This action cannot be undone."), actions=[ft.TextButton("Cancel", on_click=lambda e: close_any_dialog(confirm_hard_del_dialog)), ft.ElevatedButton("DELETE EVERYTHING", color="white", bgcolor="red", on_click=execute_hard_delete)])
@@ -1130,7 +1120,7 @@ def main(page: ft.Page):
         def open_hard_delete_confirm():
             page.open(confirm_hard_del_dialog); page.update()
 
-        my_appbar = ft.AppBar(leading=ft.IconButton(ft.Icons.ARROW_BACK, on_click=lambda e: handle_back_button()), title=ft.Text("Job Details", size=16), bgcolor="blue" if category_val == "new" else "orange", color="white", actions=[ft.IconButton(ft.Icons.CHECK, on_click=save_click) if not is_readonly else ft.Container()])
+        my_appbar = ft.AppBar(leading=ft.IconButton(ft.Icons.ARROW_BACK, on_click=lambda e: on_android_back()), title=ft.Text("Job Details", size=16), bgcolor="blue" if category_val == "new" else "orange", color="white", actions=[ft.IconButton(ft.Icons.CHECK, on_click=save_click) if not is_readonly else ft.Container()])
 
         status_buttons = []
         if not is_new and not is_readonly:
@@ -1175,7 +1165,7 @@ def main(page: ft.Page):
         state["in_details"] = False; state["history_filter_job"] = job_code_filter
         title_str = f"History: {job_code_filter}" if job_code_filter else "Global System History"
         
-        leading_icon = ft.IconButton(ft.Icons.ARROW_BACK, on_click=lambda e: handle_back_button()) if job_code_filter else ft.IconButton(ft.Icons.MENU, on_click=safe_open_drawer)
+        leading_icon = ft.IconButton(ft.Icons.ARROW_BACK, on_click=lambda e: on_android_back()) if job_code_filter else ft.IconButton(ft.Icons.MENU, on_click=safe_open_drawer)
 
         my_appbar = ft.AppBar(leading=leading_icon, title=ft.Text(title_str, size=14), bgcolor="blue", color="white")
         logs = db.fetch_history(job_code_filter)
@@ -1200,16 +1190,12 @@ def main(page: ft.Page):
                 
                 tile = ft.Container(content=ft.Column([ft.Row([ft.Text(job_c, weight="bold"), ft.Text(time, size=10, color="grey")], alignment="spaceBetween"), ft.Text(f"{user}: {msg}", size=12)]), padding=10, bgcolor=ft.Colors.GREY_100, border_radius=5)
                 lv.controls.append(tile)
-            except Exception as e:
-                print(f"Skipped bad history view log: {e}")
+            except Exception as e: pass
         
         main_content = ft.Container(content=lv, alignment=ft.alignment.top_center, expand=True)
-        if job_code_filter:
-            push_view("/history", my_appbar, main_content)
-        else:
-            render_root(my_appbar, main_content)
+        if job_code_filter: push_view("/history", my_appbar, main_content)
+        else: render_root(my_appbar, main_content)
 
     show_login()
 
-# Standard build command - perfect for APK packaging
 ft.app(target=main, assets_dir="assets")
