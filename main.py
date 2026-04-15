@@ -18,7 +18,7 @@ SUPABASE_URL = "https://qqxaujdifamluzlhixvv.supabase.co".strip()
 SUPABASE_KEY = "sb_publishable_lVx4h2kOKOB6_zenbJRH_g_GNCt5TgX".strip()
 CF_PUBLIC_URL = "https://pub-32ddff17a392469a9df219f69d896722.r2.dev"
 
-APP_VERSION = "v3.3"
+APP_VERSION = "v3.5"
 
 # --- STATUS CONFIG ---
 STATUSES_NEW = [
@@ -151,7 +151,7 @@ class DbManager:
             if old_status is not None and new_status is not None and old_status != new_status:
                 log_msg = f"{STATUS_DICT.get(old_status, '?').split(' - ')[0]} -> {STATUS_DICT.get(new_status, '?').split(' - ')[0]}"
             else:
-                core_fields = ["customer", "price_text", "memo_no", "invoice_no", "do_no", "billed_by", "flagged", "payment_type", "chassis_no", "vehicle_no", "supervisor", "trailer_type", "summary"]
+                core_fields = ["customer", "price_text", "memo_no", "invoice_no", "do_no", "billed_by", "flagged", "payment_type", "chassis_no", "vehicle_no", "supervisor", "trailer_type", "summary", "finance_remarks"]
                 notes_fields = ["notes", "price_breakdown"]
                 
                 core_changed = any(str(old_data.get(f,'')) != str(new_data.get(f,'')) for f in core_fields if f in new_data)
@@ -312,7 +312,8 @@ def main(page: ft.Page):
     def on_date_changed(e):
         if active_date_field[0] and e.control.value:
             fixed_date = e.control.value + timedelta(hours=8)
-            active_date_field[0].value = fixed_date.strftime("%Y-%m-%d")
+            # CHANGED: Now formats back to DD/MM/YYYY
+            active_date_field[0].value = fixed_date.strftime("%d/%m/%Y")
             page.update()
 
     global_date_picker = ft.DatePicker(first_date=datetime(2020, 1, 1), last_date=datetime(2040, 12, 31), on_change=on_date_changed)
@@ -320,7 +321,7 @@ def main(page: ft.Page):
 
     def open_date_picker(e, text_field):
         active_date_field[0] = text_field
-        try: global_date_picker.value = datetime.strptime(text_field.value, "%Y-%m-%d")
+        try: global_date_picker.value = datetime.strptime(text_field.value, "%d/%m/%Y")
         except: global_date_picker.value = datetime.now()
         page.open(global_date_picker)
         page.update()
@@ -449,7 +450,8 @@ def main(page: ft.Page):
         def refresh_worker():
             last_checked_id = None
             while True:
-                time.sleep(60) 
+                # CHANGED: 10 second refresh polling
+                time.sleep(10) 
                 if state["user"] != "" and not state["in_details"]:
                     try:
                         latest_log = db.fetch_history(limit=1)
@@ -461,7 +463,10 @@ def main(page: ft.Page):
                                 last_checked_id = current_latest_id
                                 snack = ft.SnackBar(
                                     content=ft.Row([ft.Icon(ft.Icons.NOTIFICATIONS_ACTIVE, color="white"), ft.Text("New updates available in the system.", color="white")]), 
-                                    bgcolor=ft.Colors.BLUE_900, duration=6000, action="Refresh", action_color="yellow", on_action=lambda e: reload_current_view()
+                                    bgcolor=ft.Colors.BLUE_900, 
+                                    # CHANGED: 30 minutes duration
+                                    duration=1800000, 
+                                    action="Refresh", action_color="yellow", on_action=lambda e: reload_current_view()
                                 )
                                 page.open(snack)
                                 page.update()
@@ -817,13 +822,17 @@ def main(page: ft.Page):
         t_notes = ft.TextField(label="Production Notes", value=job.get('notes','') if job else "", multiline=True, min_lines=3)
         t_breakdown = ft.TextField(label="Price Breakdown / Costing", value=job.get('price_breakdown','') if job else "", multiline=True, min_lines=3)
         
+        # CHANGED: Added Finance remarks to Mobile for feature parity
+        t_finance_remarks = ft.TextField(label="Finance / Payment Remarks", value=job.get('finance_remarks','') if job else "", multiline=True, min_lines=2)
+
         dd_flag = ft.Dropdown(label="Job Label / Priority", options=[ft.dropdown.Option("0", "Normal"), ft.dropdown.Option("1", "🚨 No deposit & suspended (RED)"), ft.dropdown.Option("2", "⚠️ No deposit & WIP (ORANGE)"), ft.dropdown.Option("3", "⏳ For standby purpose (YELLOW)")], value=str(flag_val))
         dd_payment_type = ft.Dropdown(label="Payment Type", options=[ft.dropdown.Option("Cash"), ft.dropdown.Option("Full Loan"), ft.dropdown.Option("Deposit & Balance")], value=job.get('payment_type', 'Cash') if job else "Cash")
 
         receipts_list = ft.Column(spacing=5)
         edit_state = {"receipt_id": None}
 
-        dlg_edit_date = ft.TextField(label="Date (YYYY-MM-DD)", read_only=True, expand=True)
+        # CHANGED: Removed read_only=True so you can type
+        dlg_edit_date = ft.TextField(label="Date (DD/MM/YYYY)", expand=True)
         btn_cal_edit = ft.IconButton(icon=ft.Icons.CALENDAR_MONTH, icon_size=24, on_click=lambda e: open_date_picker(e, dlg_edit_date))
         row_edit_date = ft.Row([dlg_edit_date, btn_cal_edit])
         
@@ -835,9 +844,16 @@ def main(page: ft.Page):
             try: amt_val = float(dlg_edit_amt.value)
             except ValueError: show_snack("Amount must be a number", is_error=True); return
 
+            # CHANGED: Strict validation check
+            try:
+                parsed_date = datetime.strptime(dlg_edit_date.value.strip(), "%d/%m/%Y")
+            except ValueError:
+                show_snack("Invalid date! Please use strictly DD/MM/YYYY (e.g., 15/04/2026)", is_error=True)
+                return
+
             e.control.disabled = True; page.update()
 
-            db_ready_date = f"{dlg_edit_date.value}T12:00:00+08:00"
+            db_ready_date = f"{parsed_date.strftime('%Y-%m-%d')}T12:00:00+08:00"
             new_data = {"receipt_no": dlg_edit_no.value, "amount_paid": amt_val, "payment_date": db_ready_date}
             
             ok, result = db.update_receipt(edit_state["receipt_id"], new_data, current_job_id)
@@ -855,7 +871,15 @@ def main(page: ft.Page):
 
         def open_edit_receipt(r):
             if is_readonly: return
-            edit_state["receipt_id"] = r['id']; dlg_edit_date.value = str(r.get('payment_date', ''))[:10]; dlg_edit_no.value = r.get('receipt_no', ''); dlg_edit_amt.value = str(r.get('amount_paid', '0'))
+            edit_state["receipt_id"] = r['id']
+            
+            raw_db_date = str(r.get('payment_date', ''))[:10]
+            try: dlg_edit_date.value = datetime.strptime(raw_db_date, "%Y-%m-%d").strftime("%d/%m/%Y")
+            except: dlg_edit_date.value = ""
+            
+            dlg_edit_no.value = r.get('receipt_no', '')
+            dlg_edit_amt.value = str(r.get('amount_paid', '0'))
+            
             page.open(edit_rec_dialog)
             page.update()
 
@@ -888,7 +912,11 @@ def main(page: ft.Page):
                     try: amt = float(rec.get('amount_paid', 0))
                     except: amt = 0.0
                     total_paid += amt
-                    date_str = str(rec.get('payment_date', ''))[:10]
+                    
+                    # CHANGED: Correct DD/MM/YYYY formatting for display
+                    raw_db_date = str(rec.get('payment_date', ''))[:10]
+                    try: date_str = datetime.strptime(raw_db_date, "%Y-%m-%d").strftime("%d/%m/%Y")
+                    except: date_str = raw_db_date
                     
                     receipt_row = ft.Container(
                         content=ft.Row([
@@ -905,8 +933,9 @@ def main(page: ft.Page):
 
         load_receipts()
 
-        current_date_str = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d")
-        dlg_add_date = ft.TextField(label="Date (YYYY-MM-DD)", value=current_date_str, read_only=True, expand=True)
+        current_date_str = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%d/%m/%Y")
+        # CHANGED: Removed read_only=True
+        dlg_add_date = ft.TextField(label="Date (DD/MM/YYYY)", value=current_date_str, expand=True)
         btn_cal_add = ft.IconButton(icon=ft.Icons.CALENDAR_MONTH, icon_size=24, on_click=lambda e: open_date_picker(e, dlg_add_date))
         row_add_date = ft.Row([dlg_add_date, btn_cal_add])
         
@@ -918,9 +947,16 @@ def main(page: ft.Page):
             try: amt_val = float(dlg_add_amt.value)
             except ValueError: show_snack("Amount must be a valid number", is_error=True); return
 
+            # CHANGED: Strict validation check
+            try:
+                parsed_date = datetime.strptime(dlg_add_date.value.strip(), "%d/%m/%Y")
+            except ValueError:
+                show_snack("Invalid date! Please use strictly DD/MM/YYYY (e.g., 15/04/2026)", is_error=True)
+                return
+
             e.control.disabled = True; page.update()
 
-            db_ready_date = f"{dlg_add_date.value}T12:00:00+08:00"
+            db_ready_date = f"{parsed_date.strftime('%Y-%m-%d')}T12:00:00+08:00"
             rec_data = {"job_id": current_job_id, "receipt_no": dlg_add_no.value, "amount_paid": amt_val, "payment_date": db_ready_date}
             current_total = job.get('total_paid', 0) if job else 0
             ok, result = db.add_receipt(rec_data, current_total)
@@ -1071,7 +1107,9 @@ def main(page: ft.Page):
             page.update()
 
             final_flag = int(dd_flag.value) if dd_flag.value else 0
-            data = {"job_code": t_code.value, "memo_no": t_memo.value, "invoice_no": t_invoice.value, "do_no": t_do.value, "billed_by": t_billed.value, "customer": t_cust.value, "supervisor": t_pic.value, "trailer_type": t_type.value, "price_text": t_price.value, "summary": t_summary.value, "notes": t_notes.value, "price_breakdown": t_breakdown.value, "flagged": final_flag, "category": category_val, "payment_type": dd_payment_type.value, "chassis_no": t_chassis.value, "vehicle_no": t_vehicle.value}
+            
+            # CHANGED: Added finance_remarks to save package
+            data = {"job_code": t_code.value, "memo_no": t_memo.value, "invoice_no": t_invoice.value, "do_no": t_do.value, "billed_by": t_billed.value, "customer": t_cust.value, "supervisor": t_pic.value, "trailer_type": t_type.value, "price_text": t_price.value, "summary": t_summary.value, "notes": t_notes.value, "price_breakdown": t_breakdown.value, "flagged": final_flag, "category": category_val, "payment_type": dd_payment_type.value, "chassis_no": t_chassis.value, "vehicle_no": t_vehicle.value, "finance_remarks": t_finance_remarks.value}
 
             if is_new:
                 data["status_idx"] = 0; data["closed"] = 0
@@ -1149,7 +1187,9 @@ def main(page: ft.Page):
                 status_buttons.append(ft.Divider())
                 status_buttons.append(ft.ElevatedButton("PERMANENTLY DELETE FROM DATABASE", color="white", bgcolor="red", icon=ft.Icons.DELETE_FOREVER, on_click=lambda e: open_hard_delete_confirm()))
 
-        finance_section = ft.Container(content=ft.Column([ft.Text("Finance & Payments", weight="bold", color="green"), dd_payment_type, btn_add_receipt if not is_readonly else ft.Container(), receipts_list]), padding=10, border=ft.border.all(1, "green"), border_radius=8)
+        # CHANGED: Added t_finance_remarks to the section
+        finance_section = ft.Container(content=ft.Column([ft.Text("Finance & Payments", weight="bold", color="green"), dd_payment_type, t_finance_remarks, btn_add_receipt if not is_readonly else ft.Container(), receipts_list]), padding=10, border=ft.border.all(1, "green"), border_radius=8)
+        
         btn_view_history_details = ft.ElevatedButton("View Job History", icon=ft.Icons.HISTORY, on_click=lambda e: view_specific_history(e, job), bgcolor=ft.Colors.BLUE_50, color="blue") if not is_new else ft.Container(height=0)
 
         main_content = ft.Container(
